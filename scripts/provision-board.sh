@@ -291,8 +291,24 @@ alive() (
 # had merely moved to a new lease mid-install — and the watcher announced provisioning complete and
 # then a health check that could not connect. Which of the two it is decides whether to stop or to
 # go looking, so it cannot be collapsed.
+#
+# **Only `test`'s own 1 means the file is gone.** ssh exits 255 when *it* fails, and it fails for
+# one round-trip at a time on a board busy unpacking packages: a 5 s connect timeout and a 6 s
+# keepalive budget are both reachable while apt runs triggers on 1 GB of memory. Reading any
+# non-zero as "absent" let one slow answer, followed by a successful `alive`, announce provisioning
+# finished mid-apt — and then run `robotctl health` on a board that did not have robotctl yet.
 still_provisioning() {
-    if rsh "test -f ${STATE}" >/dev/null 2>&1; then
+    _state=0
+    rsh "test -f ${STATE}" >/dev/null 2>&1 || _state=$?
+    if [ "$_state" != 0 ] && [ "$_state" != 1 ]; then
+        # No answer about the file at all. Ask again next time round if the board is there;
+        # otherwise it is the lost board the verdict 2 exists for.
+        if alive 10; then
+            return 0
+        fi
+        return 2
+    fi
+    if [ "$_state" = 0 ]; then
         # The state file outlives a phase 2 that *failed*: `provision.sh` removes it only on the way
         # out cleanly, so its presence alone cannot tell a board still working from one that stopped
         # with an error. Ask systemd, which knows.
