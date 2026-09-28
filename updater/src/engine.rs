@@ -420,13 +420,6 @@ impl Engine {
         let manifest = signed.parsed;
         Self::check_channel(&manifest, component)?;
 
-        if let Err(reason) = require_artifact_budget(manifest.size, cfg.max_artifact_bytes) {
-            return Ok(CheckResult::Incompatible {
-                candidate: manifest.version,
-                reason,
-            });
-        }
-
         if Some(&manifest.version) == installed.as_ref() {
             return Ok(CheckResult::UpToDate {
                 installed: manifest.version,
@@ -439,6 +432,13 @@ impl Engine {
             return Ok(CheckResult::Incompatible {
                 candidate: manifest.version,
                 reason: format!("component is pinned to {pinned}"),
+            });
+        }
+
+        if let Err(reason) = require_artifact_budget(manifest.size, cfg.max_artifact_bytes) {
+            return Ok(CheckResult::Incompatible {
+                candidate: manifest.version,
+                reason,
             });
         }
 
@@ -777,10 +777,6 @@ impl Engine {
             )));
         }
 
-        // `apply` can be called without `check`, including for exact versions and sideloads.
-        require_artifact_budget(manifest.size, cfg.max_artifact_bytes)
-            .map_err(Error::Incompatible)?;
-
         if Some(&manifest.version) == installed.as_ref() {
             // Correct, and for years the whole answer. It is the wrong *question* in one case: the
             // release is installed and a daemon is serving from a different one. That is what an
@@ -793,6 +789,10 @@ impl Engine {
                 stale,
             });
         }
+
+        // `apply` can be called without `check`, including for exact versions and sideloads.
+        require_artifact_budget(manifest.size, cfg.max_artifact_bytes)
+            .map_err(Error::Incompatible)?;
 
         // Rollback-attack guard. A signature proves an artifact is *ours*; it says
         // nothing about it being *current*. A stale or reverted mirror can serve an

@@ -513,6 +513,43 @@ async fn check_reports_availability_without_changing_anything() {
     assert_eq!(fx.live_version(), None, "check must not install anything");
 }
 
+/// Lowering a download budget must not block an installed release: no artifact is fetched.
+#[tokio::test]
+async fn component_guard_check_accepts_installed_over_budget_release() {
+    let fx = Fixture::new();
+    fx.publish("1.0.0", None);
+    apply_latest(&mut fx.engine_healthy()).await.unwrap();
+    std::fs::remove_file(fx.releases.join("daemon-1.0.0.tar.zst")).unwrap();
+    let engine = fx.engine(
+        Box::new(FakeRobot::healthy()),
+        Faults::none(),
+        "max_artifact_bytes = 1",
+    );
+    let result = engine.check("daemon").await.unwrap();
+    assert!(
+        matches!(result, CheckResult::UpToDate { installed } if installed == semver::Version::new(1, 0, 0))
+    );
+}
+
+#[tokio::test]
+async fn component_guard_apply_accepts_installed_over_budget_release() {
+    let fx = Fixture::new();
+    fx.publish("1.0.0", None);
+    apply_latest(&mut fx.engine_healthy()).await.unwrap();
+    std::fs::remove_file(fx.releases.join("daemon-1.0.0.tar.zst")).unwrap();
+    let mut engine = fx.engine(
+        Box::new(FakeRobot::healthy()),
+        Faults::none(),
+        "max_artifact_bytes = 1",
+    );
+    let result = apply_latest(&mut engine).await.unwrap();
+    assert!(
+        matches!(result, ApplyResult::AlreadyCurrent { version, .. } if version == semver::Version::new(1, 0, 0))
+    );
+    assert_eq!(fx.live_version().as_deref(), Some("1.0.0"));
+    assert_eq!(fx.staging_leftovers(), 0);
+}
+
 /// A signed release can still be unsuitable for a particular component. Checking and applying
 /// independently must both refuse it, before trying to fetch the artifact.
 #[tokio::test]

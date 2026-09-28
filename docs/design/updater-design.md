@@ -1133,7 +1133,8 @@ max_artifact_bytes = 134217728 # compressed bytes, inclusive
 ```
 
 `max_artifact_bytes` requires a declared `size` in the signed manifest. Both `check`
-and `apply` refuse a missing or over-budget size before fetching the artifact;
+and `apply` refuse a missing or over-budget size before fetching a new artifact;
+an already-installed version needs no download and bypasses this budget.
 `apply` also checks the downloaded file's actual size before extraction. This is
 an installation budget, not a per-transfer streaming limit: an underreported
 artifact is refused after download. The HTTP source's transfer limit and the
@@ -1145,8 +1146,13 @@ without `..`; directories and links resolving outside the extracted tree do not
 satisfy them. `check` does not download or inspect the archive, so it cannot verify
 this file list. A refusal leaves the installed release in place and removes staging.
 
-Both settings default to disabled. Enable them only after installing an updater
-that understands these config keys; an older updater rejects unknown fields.
+Omitted settings disable their respective guards. The shipped `deploy/updater.toml`
+enables `required_files` for every daemon release binary, including tools that no
+systemd unit executes; `xtask` tests keep that list matched to all packaging recipes.
+`max_artifact_bytes` remains unset. The installer pairs this config with its release
+through `DUCK_CONFIG_REF`, so the updater understands the shipped keys. When overriding
+that ref or adding these keys to an existing config, use an updater that understands
+them; older updaters reject unknown fields.
 
 
 Note the model uses `reload` (SIGHUP → re-mmap weights) rather than `restart`,
