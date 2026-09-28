@@ -1984,6 +1984,48 @@ mod tests {
         }
     }
 
+    /// Guard every shipped binary, including tools that no systemd unit execs.
+    #[test]
+    fn daemon_required_files_match_packaged_binaries() {
+        use std::collections::BTreeSet;
+
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap();
+        let config: toml::Value =
+            toml::from_str(&std::fs::read_to_string(root.join("deploy/updater.toml")).unwrap())
+                .unwrap();
+        let required: BTreeSet<String> = config["component"]["daemon"]
+            .get("required_files")
+            .and_then(toml::Value::as_array)
+            .expect("the shipped daemon config must enable required_files")
+            .iter()
+            .map(|value| value.as_str().unwrap().to_owned())
+            .collect();
+        for site in PACKAGING_SITES {
+            let text = std::fs::read_to_string(root.join(site)).unwrap();
+            let packaged: BTreeSet<String> = text
+                .lines()
+                .map(str::trim)
+                .filter(|line| line.starts_with("cp ") && line.ends_with(" staged/"))
+                .map(|line| {
+                    format!(
+                        "bin/{}",
+                        line.trim_end_matches(" staged/")
+                            .rsplit('/')
+                            .next()
+                            .unwrap()
+                    )
+                })
+                .collect();
+            assert!(!packaged.is_empty(), "{site}: no staged binaries found");
+            assert_eq!(
+                required, packaged,
+                "required_files must match the binaries packaged by {site}"
+            );
+        }
+    }
+
     /// Every binary a packaged unit tries to exec must be staged into the artifact.
     ///
     /// The sibling of the test above, and the case it missed. The units were packaged and the

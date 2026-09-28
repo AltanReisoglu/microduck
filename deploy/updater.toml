@@ -84,6 +84,14 @@ allow_users = ["btd", "mediad"]
 install_dir   = "/opt/robot/daemon"
 keep_previous = 1
 
+# Include tools with no systemd unit, too: orphan checks cannot catch their absence.
+# xtask's packaging tests keep this list aligned with every release recipe.
+required_files = [
+    "bin/updaterd", "bin/robotctl", "bin/robotd", "bin/configd", "bin/btd",
+    "bin/padd", "bin/mediad", "bin/sounds", "bin/pet-detect", "bin/pet-features",
+    "bin/tofd",
+]
+
 # `golden` is deliberately unset until 1.0.0 exists.
 #
 # It names a never-pruned known-good release, and `robotctl update reset-to-golden` is
