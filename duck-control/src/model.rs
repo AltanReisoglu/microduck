@@ -105,6 +105,27 @@ pub const EXPECTED_REGISTERS: &[(&str, u8)] = &[
     ("shutdown", 52),
 ];
 
+/// `homing_offset` on the knees, in raw position counts (0.088° each, so −45°).
+///
+/// Every other joint is at 0. The value is `microduck_runtime`'s `setup_motor_rpi.py`, the
+/// flashing rig every servo on a built robot went through, so [`DEFAULT_POSITION`] and every
+/// policy assume it. A servo straight from the box arrives at 0, so a knee adopted without this
+/// reads and drives 45° off, with nothing in the journal to say why.
+pub const KNEE_HOMING_OFFSET: i32 = -512;
+
+/// Right and left knee: the only joints whose `homing_offset` is not 0.
+pub const KNEE_IDS: [u8; 2] = [13, 23];
+
+/// The `homing_offset` a servo should hold, asserted alongside [`EXPECTED_REGISTERS`]. It is
+/// kept apart from them because it is an `i32` and differs per joint.
+pub fn homing_offset(id: u8) -> i32 {
+    if KNEE_IDS.contains(&id) {
+        KNEE_HOMING_OFFSET
+    } else {
+        0
+    }
+}
+
 /// Index of a joint by name. Linear scan over 15 entries, used at startup and in tests.
 pub fn joint_index(name: &str) -> Option<usize> {
     JOINT_NAMES.iter().position(|n| *n == name)
@@ -207,6 +228,20 @@ mod tests {
             "the three faults worth latching on, with input-voltage clear"
         );
         assert_eq!(want & INPUT_VOLTAGE, 0);
+    }
+
+    /// The knee IDs are positional facts about [`JOINT_IDS`]; a renumbering that moved them
+    /// would put the offset on a hip.
+    #[test]
+    fn only_the_knees_have_a_homing_offset() {
+        for (i, &id) in JOINT_IDS.iter().enumerate() {
+            let want = if JOINT_NAMES[i].ends_with("_knee") {
+                KNEE_HOMING_OFFSET
+            } else {
+                0
+            };
+            assert_eq!(homing_offset(id), want, "{}", JOINT_NAMES[i]);
+        }
     }
 
     /// `MOUTH_INDEX` is used to skip a slot when mapping 14 policy actions onto 15 joints.

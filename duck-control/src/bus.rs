@@ -27,7 +27,7 @@ use crate::imu::{IMU_BLOCK_LEN, SflpDecoder};
 use crate::io::{ImuStale, IoError, JointTargets, Result, RobotIo, Sensors, SlowSensors};
 use crate::model::{
     BAUD_RATE, EXPECTED_REGISTERS, FACTORY_BAUD_RATE, FACTORY_ID, IMU_DXL_ID, JOINT_IDS,
-    JOINT_NAMES, NUM_JOINTS,
+    JOINT_NAMES, NUM_JOINTS, homing_offset,
 };
 
 /// Start of the contiguous block read every tick: `present_pwm`, `present_current`,
@@ -190,6 +190,34 @@ impl DynamixelIo {
                 other => unreachable!("unhandled register {other}"),
             }
             .map_err(|e| IoError::Bus(format!("write {name} on {id}: {e}")))?;
+            std::thread::sleep(EEPROM_SETTLE);
+            fixed += 1;
+        }
+
+        // An EEPROM register like the others, so it is written only with torque off, which is how
+        // a servo powers up and how a fresh one is adopted.
+        let want = homing_offset(id);
+        let got = *self
+            .controller
+            .read_homing_offset(id)
+            .map_err(|e| IoError::Bus(format!("read homing_offset on {id}: {e}")))?
+            .first()
+            .ok_or(IoError::ShortRead {
+                what: "register read",
+                expected: 1,
+                got: 0,
+            })?;
+        if got != want {
+            tracing::warn!(
+                id,
+                register = "homing_offset",
+                got,
+                want,
+                "correcting motor register"
+            );
+            self.controller
+                .write_homing_offset(id, want)
+                .map_err(|e| IoError::Bus(format!("write homing_offset on {id}: {e}")))?;
             std::thread::sleep(EEPROM_SETTLE);
             fixed += 1;
         }

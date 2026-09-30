@@ -276,7 +276,10 @@ saying so:
   torque once the supply passes the servo's `Max Voltage Limit`, which nothing here writes and
   which therefore stays at its default 7.0 V. A charged 2S pack sits above that, so the clear
   bit is what lets this bus run the pack's range across a servo rated to 6.0 V. Read as
-  "latches on input-voltage faults" it says the opposite of what it does.
+  "latches on input-voltage faults" it says the opposite of what it does. Alongside them,
+  `homing_offset` is −512 on the knees (13, 23) and 0 everywhere else, the values from the
+  runtime's `setup_motor_rpi.py` flashing rig. Every pose and policy assumes the knees carry that
+  offset, and a servo straight from the box does not.
 - **A swapped-in servo is adopted, not configured by hand.** A new XL330 answers as ID 1 at
   57 600 baud, and neither is used on this bus. So before the register check, `open_bus` pings
   the fifteen expected IDs; if *exactly one* is silent, it looks for ID 1 — first at 1 Mbps,
