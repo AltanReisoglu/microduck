@@ -3,12 +3,19 @@
 //! The rule, in full:
 //!  - a pad already **connected** means nothing happens. The robot has a driver, and a tag brushed
 //!    against it must not hand the bond to someone else's pad;
-//!  - otherwise the pad at the tag's address is paired, and the robot quacks once it is.
+//!  - otherwise the robot quacks to say it read the tag, pairs the pad at the tag's address, and
+//!    greets once it has — two different sounds, so someone holding the pad hears the difference
+//!    between "got your tag, pairing" and "done". A refusal gets no second sound.
 //!
 //! The pad still has to be in pairing mode when the tag is touched — Sync on an Xbox pad, until
 //! the light flashes fast. The tag says *which* pad; it cannot wake one up.
 
 use duck_ipc_proto as proto;
+
+/// "Tag read, pairing now": the mouth-trigger quack, the one `robotctl quack` plays.
+pub const HEARD: proto::SoundTag = proto::SoundTag::Chirp;
+/// "Paired": the wake-up quack, sometimes a double "wak-wak" — unmistakably not [`HEARD`].
+pub const PAIRED: proto::SoundTag = proto::SoundTag::Greet;
 
 /// Polls in a row without the tag before it counts as lifted.
 ///
@@ -60,7 +67,7 @@ impl Touches {
 pub trait Robot {
     fn pads(&mut self) -> Result<Vec<proto::Pad>, String>;
     fn pair(&mut self, mac: &str) -> Result<proto::PadPairResult, String>;
-    fn quack(&mut self) -> Result<(), String>;
+    fn sound(&mut self, tag: proto::SoundTag) -> Result<(), String>;
 }
 
 /// How a touch ended, for the journal and the tests.
@@ -69,7 +76,8 @@ pub enum Outcome {
     /// A pad is driving already; nothing was asked.
     AlreadyConnected(proto::Pad),
     Paired(proto::Pad),
-    /// Paired, and the robot would not quack — muted, or no voice bank. Still a pairing.
+    /// Paired, and the robot would not make its second sound — muted, or no voice bank. Still a
+    /// pairing.
     PairedSilently(proto::Pad, String),
     NotPaired(proto::PadPairFailure, Option<String>),
     /// `configd` could not be asked, or its machinery failed.
@@ -84,10 +92,15 @@ pub fn on_touch(robot: &mut dyn Robot, mac: &str) -> Outcome {
     if let Some(pad) = pads.into_iter().find(|p| p.connected) {
         return Outcome::AlreadyConnected(pad);
     }
+    // Before the pairing, which blocks for up to fifteen seconds: this is the answer to "did it
+    // see my tag". A robot that will not make a sound still pairs.
+    if let Err(why) = robot.sound(HEARD) {
+        tracing::info!(%why, "the robot would not quack for the tag");
+    }
     match robot.pair(mac) {
         Err(e) => Outcome::Failed(format!("pad.pair: {e}")),
         Ok(proto::PadPairResult::Failed { reason, detail }) => Outcome::NotPaired(reason, detail),
-        Ok(proto::PadPairResult::Paired { pad }) => match robot.quack() {
+        Ok(proto::PadPairResult::Paired { pad }) => match robot.sound(PAIRED) {
             Ok(()) => Outcome::Paired(pad),
             Err(e) => Outcome::PairedSilently(pad, e),
         },
@@ -132,8 +145,8 @@ mod tests {
                 },
             })
         }
-        fn quack(&mut self) -> Result<(), String> {
-            self.calls.push("quack".into());
+        fn sound(&mut self, tag: proto::SoundTag) -> Result<(), String> {
+            self.calls.push(tag.as_str().into());
             Ok(())
         }
     }
@@ -152,7 +165,7 @@ mod tests {
     }
 
     #[test]
-    fn with_no_pad_driving_the_tagged_one_is_paired_and_the_robot_quacks() {
+    fn with_no_pad_driving_it_quacks_pairs_the_tagged_one_then_greets() {
         // A pad bonded and switched off is not driving: it does not stop the tagged one.
         let mut robot = Fake {
             pads: vec![pad("AA:BB:CC:DD:EE:FF", false)],
@@ -161,12 +174,12 @@ mod tests {
         assert!(matches!(on_touch(&mut robot, MAC), Outcome::Paired(p) if p.mac == MAC));
         assert_eq!(
             robot.calls,
-            ["status", format!("pair {MAC}").as_str(), "quack"]
+            ["status", "chirp", format!("pair {MAC}").as_str(), "greet"]
         );
     }
 
     #[test]
-    fn a_refused_pairing_does_not_quack() {
+    fn a_refused_pairing_quacks_for_the_tag_and_does_not_greet() {
         let mut robot = Fake {
             refuse: Some(proto::PadPairFailure::NotFound),
             ..Fake::default()
@@ -175,7 +188,10 @@ mod tests {
             on_touch(&mut robot, MAC),
             Outcome::NotPaired(proto::PadPairFailure::NotFound, None)
         );
-        assert!(!robot.calls.contains(&"quack".to_owned()));
+        assert_eq!(
+            robot.calls,
+            ["status", "chirp", format!("pair {MAC}").as_str()]
+        );
     }
 
     #[test]

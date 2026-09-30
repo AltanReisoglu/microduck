@@ -4,7 +4,8 @@
 //!
 //! Polls the reader five times a second. When a tag arrives, the first Bluetooth address in its
 //! NDEF is taken as a pad's: if a pad is already connected nothing happens, otherwise `configd` is
-//! asked to pair that one and `robotd` to quack once it has. The rule and why it is that rule are
+//! asked to pair that one — with a quack from `robotd` when the tag is read and a different sound
+//! once the pad is paired. The rule and why it is that rule are
 //! in [`nfc::pairing`].
 //!
 //! ## Why its own daemon
@@ -178,9 +179,9 @@ fn report(mac: &str, outcome: Outcome) {
         Outcome::AlreadyConnected(pad) => {
             tracing::warn!(%mac, driving = %pad.mac, name = %pad.name, "a pad is already connected — nothing to do")
         }
-        Outcome::Paired(pad) => tracing::warn!(mac = %pad.mac, name = %pad.name, "paired — quack"),
+        Outcome::Paired(pad) => tracing::warn!(mac = %pad.mac, name = %pad.name, "paired"),
         Outcome::PairedSilently(pad, why) => {
-            tracing::warn!(mac = %pad.mac, name = %pad.name, %why, "paired, but the robot would not quack")
+            tracing::warn!(mac = %pad.mac, name = %pad.name, %why, "paired, but the robot would not make a sound")
         }
         Outcome::NotPaired(reason, detail) => tracing::warn!(
             %mac, ?reason, ?detail,
@@ -222,12 +223,8 @@ impl Robot for Sockets {
         call(&self.config, &proto::Call::PadPair(params), PAIR_ANSWER)
     }
 
-    fn quack(&mut self) -> Result<(), String> {
-        // The same sound `robotctl quack` plays: the mouth-trigger quack, in this robot's voice.
-        let sound = proto::Call::RobotSound(proto::SoundParams {
-            tag: proto::SoundTag::Chirp,
-            hold: None,
-        });
+    fn sound(&mut self, tag: proto::SoundTag) -> Result<(), String> {
+        let sound = proto::Call::RobotSound(proto::SoundParams { tag, hold: None });
         let outcome: proto::IntentResult = call(&self.robot, &sound, QUICK_ANSWER)?;
         if outcome.accepted {
             Ok(())
