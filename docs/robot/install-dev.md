@@ -124,7 +124,8 @@ branch.
 Provisioning **fails** if that build cannot be installed, or if it is installed and then rolled back
 by the health gate. A dev board quietly running the stable release when a branch was asked for is the
 worst failure to debug: everything looks installed and the code under test is not there. Give CI its
-minute or two before provisioning, and check with `gh run list --branch BRANCH` if it stops.
+minute or two before provisioning, and check with `gh run list --branch BRANCH` if it stops. `--name`
+is applied before the branch build, so a board that fails here still has its name.
 
 Other useful flags: `--name Ducky` names the robot instead of leaving it the `duck-7f3a` it derives
 from its own serial (`robotctl system set-name` changes it later, so this only saves a command),
