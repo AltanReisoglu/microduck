@@ -519,9 +519,13 @@ the thumb:
 | **D-pad right** | head + move: left stick forward/back and turn, right stick looks around (head yaw and pitch). With `[pad_imu_head_control] enabled` and a pad that has an IMU, the pad's tilt poses the head instead and the sticks keep the move mapping — see below |
 | **D-pad down** | body + head: left stick up/down rises and crouches, left/right leans the body sideways; right stick looks around (head yaw and pitch). The body does not walk |
 | **Start**, press | first press: torque on and a 2 s ramp to the home pose, then hold. Second press: the policy drives. After that it toggles the policy |
-| **Start**, held 1.5 s | home pose, motors stiff, policy off — the "put everything back" button, from anywhere |
+| **Start**, held 1.5 s | home pose, motors stiff, policy off — the "put everything back" button, from anywhere. Sitting, it stays seated, stiff: A stands it up after the next Start |
 | **Select**, held 2 s | torque off (`robot.relax`). The robot drops, so hold it. Start stands it up again |
 | **Select**, held 4 s | power off, where it lies — torque went at 2 s, so it does not sit first. The release afterwards does nothing more |
+
+**One move at a time.** A kick, a pick or a sit is refused while another is running, and a
+seated robot only accepts A (stand up). Stopping the policy while it sits keeps it seated; cutting
+torque or rebooting the servos forgets the seat entirely.
 
 The D-pad selects rather than toggles: a press lands in the mode its arrow names, whatever mode
 you were in. Leaving a mode puts back what it moved — the body returns to nominal after body +

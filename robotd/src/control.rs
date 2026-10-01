@@ -31,6 +31,10 @@
 //! saving/restoring `action_scale` on transitions, which can leave a stale value behind
 //! after a sit→stand cycle until the next walk. Here scale and gain are recomputed from
 //! the active state every tick — same values on every path that matters, no leftovers.
+//!
+//! A second: **one move at a time, and none from the seat** ([`Controller::move_blocked`]). The
+//! prototype let a pick preempt a kick's tail and a chaining skill roll out of a kick or the seat;
+//! here each is refused, and a seated robot accepts only standing up.
 
 use duck_control::model::{DEFAULT_POSITION, NUM_JOINTS};
 use duck_control::obs::{ACTION_LEN, Command, Observation};
@@ -228,6 +232,10 @@ pub struct Controller {
     /// with different numbers.
     active: Option<ActiveSkill>,
     sit: Sit,
+    /// Seconds left of the glide down into the seat after a sit was asked for. The seat is
+    /// `Sit::Sitting` from the first tick, but the robot is still travelling, and standing it
+    /// back up halfway down is one move cut into another.
+    sit_settle: f64,
     /// The network the last [`Self::step`] ran. `None` before the first.
     last_net: Option<Net>,
 }
@@ -243,6 +251,7 @@ impl Controller {
             ground_pick: None,
             active: None,
             sit: Sit::Up,
+            sit_settle: 0.0,
             last_net: None,
         }
     }
@@ -285,6 +294,7 @@ impl Controller {
         self.ground_pick = from.ground_pick;
         self.active = from.active;
         self.sit = from.sit;
+        self.sit_settle = from.sit_settle;
         self.last_net = from.last_net;
     }
 
@@ -297,6 +307,53 @@ impl Controller {
         self.policy.reset();
         self.last_action = [0.0; ACTION_LEN];
         self.previous = None;
+    }
+
+    /// The policy was stopped on purpose: end whatever move is in flight, and keep the seat.
+    ///
+    /// A move cut short is not resumed on the next Start — its window would pick up mid-way, on
+    /// a robot that has been standing at home in between. A rise cut short counts as standing,
+    /// since that is where it was going. The seat is kept because the robot is still sitting:
+    /// the caller holds it there, and the next Start hands it back to the sitstand network
+    /// rather than to a gait that would try to walk out of a chair.
+    pub fn stop_moves(&mut self) {
+        self.ground_pick = None;
+        self.active = None;
+        self.sit_settle = 0.0;
+        if matches!(self.sit, Sit::Rising { .. }) {
+            self.sit = Sit::Up;
+        }
+    }
+
+    /// Forget everything about where the robot was: the seat, any move in flight, and the
+    /// feedback state. For when torque went away — a relax, a servo reboot — and whatever the
+    /// robot was doing before is no longer what it is doing. The next bring-up starts from a
+    /// standing robot's state, as after a boot.
+    pub fn forget(&mut self) {
+        self.reset();
+        self.ground_pick = None;
+        self.active = None;
+        self.sit = Sit::Up;
+        self.sit_settle = 0.0;
+    }
+
+    /// Why a new move cannot start now, or `None` when it can.
+    ///
+    /// One move at a time, and none from the seat: a kick or a pick from a sitting robot
+    /// throws it over, and one move started inside another hands the second network a robot
+    /// mid-pose it was never trained from.
+    fn move_blocked(&self) -> Option<&'static str> {
+        if self.ground_pick.is_some() {
+            return Some("a ground pick is running");
+        }
+        if self.active.is_some() {
+            return Some("a scripted move is already running");
+        }
+        match self.sit {
+            Sit::Sitting => Some("the robot is sitting — stand it up first"),
+            Sit::Rising { .. } => Some("the robot is standing up"),
+            Sit::Up => None,
+        }
     }
 
     pub fn has_sitstand(&self) -> bool {
@@ -321,15 +378,15 @@ impl Controller {
             || matches!(self.sit, Sit::Rising { .. })
     }
 
-    /// Start a one-shot ground pick. The prototype gates the trigger on nothing but the
-    /// network existing and the move not already running — a pick can even preempt a kick's
-    /// tail, and that stays as it was.
+    /// Start a one-shot ground pick. Refused while any other move runs or the robot is
+    /// sitting — see [`Self::move_blocked`]. The prototype let a pick preempt a kick's tail;
+    /// that was a pick starting from a robot on one leg.
     pub fn start_ground_pick(&mut self) -> Result<(), &'static str> {
         if !self.policy.has_ground_pick() {
             return Err("no ground-pick policy loaded");
         }
-        if self.ground_pick.is_some() {
-            return Err("ground pick already running");
+        if let Some(reason) = self.move_blocked() {
+            return Err(reason);
         }
         self.ground_pick = Some(0.0);
         Ok(())
@@ -350,27 +407,25 @@ impl Controller {
     /// `Ok(true)` started it; `Ok(false)` refreshed a running one, and the caller should stay
     /// quiet about that, because a held button lands here fifty times a second.
     ///
-    /// The gating is the prototype's, generalised. A scripted move blocks another, except that
-    /// a chaining skill may preempt one that is not chaining — which is how the X press could
-    /// always roll out of a kick's tail or out of the seat. A ground pick blocks everything, as
-    /// it always has.
+    /// One move at a time and none from the seat — see [`Self::move_blocked`]. The one thing a
+    /// running skill accepts is a request for itself when it chains: that is the button being
+    /// held, not a second move. The prototype also let a chaining skill preempt a kick's tail or
+    /// roll out of the seat; both were a move started from a pose it was not trained from.
     pub fn start_skill(&mut self, index: usize) -> Result<bool, &'static str> {
         let Some(def) = self.skills.skills.get(index) else {
             return Err("no such skill on this robot");
         };
         let (duration, chains) = (def.duration, def.chain);
 
-        if let Some(active) = &mut self.active {
-            if active.index == index && chains {
-                active.chain = CHAIN_WINDOW;
-                return Ok(false);
-            }
-            if !chains {
-                return Err("a scripted move is already running");
-            }
+        if let Some(active) = &mut self.active
+            && active.index == index
+            && chains
+        {
+            active.chain = CHAIN_WINDOW;
+            return Ok(false);
         }
-        if self.ground_pick.is_some() {
-            return Err("a ground pick is running");
+        if let Some(reason) = self.move_blocked() {
+            return Err(reason);
         }
         self.active = Some(ActiveSkill {
             index,
@@ -381,17 +436,25 @@ impl Controller {
         Ok(true)
     }
 
-    /// Sit if standing, stand if sitting. Refused mid-rise, as the prototype refuses it
-    /// while a stand transition is in flight.
+    /// Sit if standing, stand if sitting. Refused while any other move runs, mid-rise as the
+    /// prototype refuses it, and on the way down into the seat.
     pub fn sit_toggle(&mut self) -> Result<&'static str, &'static str> {
+        if self.ground_pick.is_some() {
+            return Err("a ground pick is running");
+        }
+        if self.active.is_some() {
+            return Err("a scripted move is already running");
+        }
         match self.sit {
             Sit::Up => {
                 if !self.policy.has_sitstand() {
                     return Err("no sitstand policy loaded");
                 }
                 self.sit = Sit::Sitting;
+                self.sit_settle = self.skills.sitstand_ramp_s;
                 Ok("sit")
             }
+            Sit::Sitting if self.sit_settle > 0.0 => Err("still sitting down"),
             Sit::Sitting => {
                 self.sit = Sit::Rising {
                     remaining: self.skills.sitstand_rise_s,
@@ -641,6 +704,7 @@ impl Controller {
         if let Sit::Rising { remaining } = &mut self.sit {
             *remaining -= dt;
         }
+        self.sit_settle = (self.sit_settle - dt).max(0.0);
 
         Ok(Step {
             targets,
@@ -743,5 +807,123 @@ mod tests {
     fn the_ground_pick_cutoff_is_the_prototypes() {
         assert_eq!(robotd_params::DEFAULT_GROUND_PICK_END_PHASE, 0.7);
         assert_eq!(robotd_params::DEFAULT_SITSTAND_RISE_S, 1.0);
+    }
+
+    /// A controller with every slot loaded — the feedforward fixture stands in for each net, which
+    /// is all the gating needs — and two skills: a kick that does not chain and a roll that does.
+    fn full_controller() -> Controller {
+        let net = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../duck-control/tests/fixtures/feedforward.onnx");
+        let policy = Policy::load(
+            &duck_control::policy::PolicyPaths {
+                walk: net.clone(),
+                sitstand: Some(net.clone()),
+                ground_pick: Some(net.clone()),
+                skills: vec![net.clone(), net],
+                ..Default::default()
+            },
+            0.05,
+        )
+        .unwrap();
+        let skill = |name: &str, duration: f64, chain: bool| robotd_params::SkillDef {
+            name: name.to_owned(),
+            duration,
+            chain,
+            ..Default::default()
+        };
+        Controller::new(
+            policy,
+            Tuning::default(),
+            SkillTuning {
+                skills: vec![skill("kick_left", 0.5, false), skill("roulade", 1.0, true)],
+                ..SkillTuning::default()
+            },
+        )
+    }
+
+    fn tick(controller: &mut Controller, seconds: f64) {
+        let sensors = duck_control::Sensors::default();
+        for _ in 0..(seconds / 0.02).round() as usize {
+            controller
+                .step(&sensors, &Command::default(), false, 0.02, 1.0)
+                .unwrap();
+        }
+    }
+
+    /// **Nothing starts from the seat but standing up.** A kick or a pick from a sitting robot
+    /// throws it over.
+    #[test]
+    #[ignore = "requires ONNX Runtime >= 1.23"]
+    fn a_seated_robot_refuses_every_move_but_standing_up() {
+        let mut c = full_controller();
+        assert_eq!(c.sit_toggle(), Ok("sit"));
+        tick(&mut c, 3.0);
+        assert!(c.is_sitting());
+
+        assert!(c.start_ground_pick().is_err());
+        assert!(c.start_skill(0).is_err(), "no kick from the seat");
+        assert!(c.start_skill(1).is_err(), "no roll out of the seat either");
+        assert!(c.is_sitting() && !c.busy(), "and the seat is untouched");
+
+        assert_eq!(c.sit_toggle(), Ok("stand"));
+        assert!(c.start_ground_pick().is_err(), "not while it rises");
+        tick(&mut c, 1.1);
+        assert_eq!(c.start_ground_pick(), Ok(()), "standing again, it may");
+    }
+
+    /// The glide down into the seat is a move too: standing up halfway down is refused.
+    #[test]
+    #[ignore = "requires ONNX Runtime >= 1.23"]
+    fn sitting_down_cannot_be_cut_short() {
+        let mut c = full_controller();
+        assert_eq!(c.sit_toggle(), Ok("sit"));
+        tick(&mut c, 1.0);
+        assert!(c.sit_toggle().is_err());
+        tick(&mut c, 1.1);
+        assert_eq!(c.sit_toggle(), Ok("stand"));
+    }
+
+    /// **One move at a time.** No kick inside a pick, no pick inside a kick, no sit inside
+    /// either, and a chaining skill no longer preempts a kick's tail.
+    #[test]
+    #[ignore = "requires ONNX Runtime >= 1.23"]
+    fn a_move_in_flight_blocks_every_other() {
+        let mut c = full_controller();
+        assert_eq!(c.start_ground_pick(), Ok(()));
+        assert!(c.start_skill(0).is_err(), "no kick during a pick");
+        assert!(c.sit_toggle().is_err(), "no sit during a pick");
+        tick(&mut c, 3.0);
+        assert!(!c.busy(), "the pick has ended");
+
+        assert_eq!(c.start_skill(0), Ok(true));
+        assert!(c.start_ground_pick().is_err(), "no pick during a kick");
+        assert!(c.start_skill(1).is_err(), "no roll cutting into a kick");
+        assert!(c.sit_toggle().is_err(), "no sit during a kick");
+        tick(&mut c, 0.6);
+
+        // The held button is still the held button: a chaining skill refreshes itself.
+        assert_eq!(c.start_skill(1), Ok(true));
+        assert_eq!(c.start_skill(1), Ok(false), "a hold, not a second move");
+    }
+
+    /// A deliberate stop keeps the seat and drops the move in flight; a reset forgets both.
+    #[test]
+    #[ignore = "requires ONNX Runtime >= 1.23"]
+    fn a_stop_keeps_the_seat_and_a_reset_forgets_it() {
+        let mut c = full_controller();
+        assert_eq!(c.sit_toggle(), Ok("sit"));
+        tick(&mut c, 3.0);
+        c.stop_moves();
+        assert!(c.is_sitting(), "still sitting after a stop");
+
+        c.forget();
+        assert!(!c.is_sitting(), "a reset forgets the seat");
+        assert_eq!(c.start_ground_pick(), Ok(()), "and moves are allowed again");
+
+        c.stop_moves();
+        assert!(
+            !c.busy(),
+            "a stop ends the pick rather than resuming it later"
+        );
     }
 }

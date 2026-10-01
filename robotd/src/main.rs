@@ -2110,6 +2110,17 @@ async fn control_loop<T: RobotIo>(
                     }
                     Err(e) => tracing::warn!(error = %e, "cannot enable torque"),
                 },
+                // Seated: stay seated, stiff. The home pose is the standing one, and ramping a
+                // sitting robot to it straight-legged pushes it over backwards. The seat is held
+                // where it is (the disable that comes with a stop already holds it), and the next
+                // Start hands it back to the sitstand network, which is what stands it up.
+                (Bringup::Ready, Some(_))
+                    if controller.as_ref().is_some_and(|c| c.is_sitting()) =>
+                {
+                    tracing::warn!(
+                        "robot.init: the robot is sitting — holding the seat, not re-homing"
+                    )
+                }
                 // Already up: ramp back to home from wherever the joints are, as the
                 // prototype's init_position always does — Start on a robot stopped
                 // mid-crouch must not hand the policy that crouch as its starting pose.
@@ -2132,6 +2143,11 @@ async fn control_loop<T: RobotIo>(
                     // ends up rather than assuming it is still at the home pose.
                     bringup = Bringup::Limp;
                     was_driving = false;
+                    // And the skill state with it: a limp robot is not sitting, kicking or
+                    // picking anything, whatever it was doing when the torque went.
+                    if let Some(controller) = controller.as_mut() {
+                        controller.forget();
+                    }
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "cannot cut torque; the robot is still powered")
@@ -2165,6 +2181,10 @@ async fn control_loop<T: RobotIo>(
             }
             bringup = Bringup::Limp;
             was_driving = false;
+            // As for a relax: the robot came back limp, and the seat or move it had is gone.
+            if let Some(controller) = controller.as_mut() {
+                controller.forget();
+            }
         }
 
         // One-shot skill requests, taken once per tick like the power request. They need a
@@ -2919,14 +2939,24 @@ async fn control_loop<T: RobotIo>(
             if !snapshot.enabled {
                 // Even a brief explicit disable ends the recurrent episode. The resume
                 // grace period below is for dropped sensor reads, not a user's stop.
-                if let Some(controller) = controller.as_mut() {
+                let seated = controller.as_mut().is_some_and(|controller| {
                     controller.reset();
-                }
-                // A deliberate stop returns to the home pose — the prototype's Start-off
-                // ("policy DISABLED - returning to default pose"). Commanded directly, no
-                // ramp: the servos do the travel at their own speed, and the robot is
-                // standing at home when Start next hands it to the policy.
-                hold = DEFAULT_POSITION;
+                    // A move cut short is dropped rather than resumed on the next Start.
+                    controller.stop_moves();
+                    controller.is_sitting()
+                });
+                hold = if seated {
+                    // Sitting: hold the seat. The home pose is the standing one, and driving a
+                    // seated robot straight to it pushes it over backwards. The next Start hands
+                    // the seat back to the sitstand network, and standing up is A from there.
+                    coast.known_positions(hold)
+                } else {
+                    // A deliberate stop returns to the home pose — the prototype's Start-off
+                    // ("policy DISABLED - returning to default pose"). Commanded directly, no
+                    // ramp: the servos do the travel at their own speed, and the robot is
+                    // standing at home when Start next hands it to the policy.
+                    DEFAULT_POSITION
+                };
             } else {
                 // Any other stop — IMU cooling, a blind bus, the armed fall gate — freezes
                 // where the robot *is*, from the last sample that arrived. Captured once,

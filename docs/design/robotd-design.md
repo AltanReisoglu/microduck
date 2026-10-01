@@ -466,6 +466,19 @@ divergence: the prototype tracks the standing action scale by saving and restori
 `action_scale` across transitions, which can leave a stale value behind after a sit→stand cycle
 until the next walk; here scale and gain are recomputed from the active state every tick.
 
+**One move at a time, and none from the seat.** A ground pick, a skill, a sit or a rise is
+refused while any other is in flight — including the glide down into the seat — and only
+standing up is accepted from a seated robot. The one request a running skill takes is one for
+itself when it chains, which is the button being held. This is a second divergence: the
+prototype let a pick preempt a kick's tail and a roulade roll out of a kick or the seat, each a
+network handed a pose it was not trained from.
+
+The seat survives a deliberate stop and nothing else. Disabling the policy ends the move in
+flight and, on a seated robot, holds the seat where it is rather than sending the standing home
+pose, which a sitting robot can only reach by going over backwards; `robot.init` on a seated
+robot holds it too. A relax or a servo reboot forgets the seat and every move with it, so the
+next bring-up starts from a standing robot's state, as after a boot.
+
 Policy files come from paths in the params file, defaulting into the release directory — so a
 normal update carries the policy trained against the binary, and a dev points a path at their
 own `.onnx` and iterates without cutting a release.
