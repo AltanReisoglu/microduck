@@ -5,7 +5,7 @@ For working on the daemons themselves. To use a robot rather than change it, see
 
 ## Building and testing
 
-Needs Rust **1.89+** (stable). The robot is aarch64 Linux; you develop on Linux or macOS, and
+Needs Rust **1.99+** (stable). The robot is aarch64 Linux; you develop on Linux or macOS, and
 the two are not quite the same checkout — see below.
 
 ```bash

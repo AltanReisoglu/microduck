@@ -842,7 +842,8 @@ the 128-bit service UUID (18) and the address field (8, see below) spend 29 of t
 advertisement holds. Before the address it was 21, and a name of 8 characters or fewer could have
 fitted alongside — `duck-c51b` is 9, one over, so in practice it never did. A scan response is a
 second exchange a central can miss on its own, which is why a device reported with no name and no
-services is a plausible robot rather than something to filter out.
+services is a plausible robot rather than something to filter out. It is also why `duckctl` keeps
+listening a few seconds past its deadline for a robot it has heard without a name (`NAME_GRACE`).
 
 #### The advertised name is the one the robot was given
 

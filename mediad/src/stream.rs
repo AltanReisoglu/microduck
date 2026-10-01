@@ -731,7 +731,7 @@ mod tests {
 
     impl Saturating for std::sync::atomic::AtomicU32 {
         fn fetch_saturating_sub(&self) -> bool {
-            self.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+            self.try_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
                 Some(n.saturating_sub(1))
             })
             .is_ok_and(|previous| previous > 0)
