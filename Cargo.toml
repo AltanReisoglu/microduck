@@ -82,11 +82,12 @@ version = "v3"
 [workspace.package]
 version = "0.15.0"
 edition = "2024"
-# 1.89 for `std::fs::File::try_lock`, which is how the single-flight update lock works
-# without a dependency (updater/src/journal.rs). Edition 2024 needs 1.85, so this covers
-# both. Declared so a teammate on an older toolchain gets "requires rustc 1.89" instead of
-# an error about a method that does not exist.
-rust-version = "1.89"
+# 1.99 for the atomics' `try_update` (mediad), which replaced the now-deprecated
+# `fetch_update`. That also covers `std::fs::File::try_lock` (1.89), how the single-flight
+# update lock works without a dependency (updater/src/journal.rs), and edition 2024 (1.85).
+# Declared so a teammate on an older toolchain gets "requires rustc 1.99" instead of an
+# error about a method that does not exist.
+rust-version = "1.99"
 license = "Apache-2.0"
 
 [workspace.dependencies]

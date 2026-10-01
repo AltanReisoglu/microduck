@@ -1931,9 +1931,9 @@ fn wire_consumers(
     if glib::subclass::signal::SignalId::lookup("consumer-removed", sink.type_()).is_some() {
         let leaving = consumers.clone();
         sink.connect("consumer-removed", false, move |_| {
-            // `fetch_update` rather than `fetch_sub`, so a spurious removal cannot wrap the count
+            // `try_update` rather than `fetch_sub`, so a spurious removal cannot wrap the count
             // around to four billion viewers.
-            let _ = leaving.fetch_update(
+            let _ = leaving.try_update(
                 std::sync::atomic::Ordering::Relaxed,
                 std::sync::atomic::Ordering::Relaxed,
                 |current| Some(current.saturating_sub(1)),
@@ -2384,12 +2384,11 @@ fn open_control_channel(
     // aborts the process rather than unwinding, because this runs inside a C closure. Checked
     // first so an upstream change becomes a logged refusal to open a control channel, with the
     // video track still working.
-    for signal in ["create-data-channel"] {
-        if glib::subclass::signal::SignalId::lookup(signal, webrtcbin.type_()).is_none() {
-            return Err(anyhow!(
-                "webrtcbin has no {signal} signal; gst-plugins-rs may have changed it"
-            ));
-        }
+    if glib::subclass::signal::SignalId::lookup("create-data-channel", webrtcbin.type_()).is_none()
+    {
+        return Err(anyhow!(
+            "webrtcbin has no create-data-channel signal; gst-plugins-rs may have changed it"
+        ));
     }
     // Reliable and ordered, which is the default and is what §2 wants for `control` —
     // `remote-webrtc.md` §6 covers why the first version opens only this one.
