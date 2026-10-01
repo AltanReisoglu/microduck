@@ -33,15 +33,15 @@
 //! D-pad up        head mode — the sticks pose the head, the body holds still
 //! D-pad right     head + move — left stick walks and turns, right stick looks around
 //! D-pad left      move — the sticks walk, strafe and turn
-//! D-pad down      body pose — the sticks lean and crouch the standing robot
+//! D-pad down      body + head — left stick crouches and leans sideways, right stick looks around
 //! Start           first press stands up, then toggles the policy
 //! Start, 1.5 s    home pose, motors stiff, policy off
 //! Select, 2 s     torque off
-//! Select, 4 s     sit down if it can, then power off
+//! Select, 4 s     power off, where it lies
 //! ```
 //!
 //! The D-pad *selects* a mode rather than toggling one, so a press always lands where its arrow
-//! says whatever mode the robot was in. Head and body-pose mode both zero the velocity while
+//! says whatever mode the robot was in. Head and body + head mode both zero the velocity while
 //! active — a robot that keeps walking because you started posing its head is a bad surprise —
 //! and leaving a mode puts back what it moved: the body snaps to nominal, the head re-centres.
 //!
@@ -307,14 +307,15 @@ enum Mode {
     /// `[pad_imu_head_control]` on a pad that has an IMU, the pad's tilt poses the head and the
     /// sticks keep the whole [`Mode::Drive`] mapping.
     HeadDrive,
-    /// D-pad down. The sticks lean and crouch the standing robot.
+    /// D-pad down. Body + head: the left stick crouches and leans the standing robot sideways,
+    /// the right stick looks around. The body does not walk.
     BodyPose,
 }
 
 impl Mode {
     /// Whether this mode sends head poses, so leaving it has a head to put back.
     fn poses_head(self) -> bool {
-        matches!(self, Self::Head | Self::HeadDrive)
+        matches!(self, Self::Head | Self::HeadDrive | Self::BodyPose)
     }
 }
 
@@ -322,7 +323,8 @@ impl Mode {
 ///
 /// Leaving a mode puts back what it moved, because nothing else will: a body left leaning or a
 /// head left turned stays that way, and the next mode does not send the joints the last one did.
-/// Moving between the two head modes keeps the head, since both go on posing it.
+/// Moving between modes that all pose the head keeps the head, since the next one goes on posing
+/// it.
 fn mode_exit_calls(from: Mode, to: Mode) -> Vec<proto::Call> {
     let mut calls = Vec::new();
     if from == Mode::BodyPose && to != Mode::BodyPose {
@@ -466,7 +468,7 @@ fn main() -> std::process::ExitCode {
         hz = args.hz,
         roller,
         "driving — A sit, B ground pick, LB/RB kicks, triggers mouth; D-pad up head, \
-         right head + move, left move, down body pose; Start stands up then toggles the policy, \
+         right head + move, left move, down body + head; Start stands up then toggles the policy, \
          Start (1.5s) home pose; Select (2s) torque off, Select (4s) power off"
     );
 
@@ -941,9 +943,19 @@ fn main() -> std::process::ExitCode {
                         } else {
                             BODY_MAX_Z_DOWN
                         },
-                    pitch: right_y * BODY_MAX_ANGLE,
-                    roll: right_x * BODY_MAX_ANGLE,
+                    // No forward/back tilt here: the right stick has the head. The side lean
+                    // keeps the old body mode's sign, moved from the right stick to the left.
+                    pitch: 0.0,
+                    roll: left_x * BODY_MAX_ANGLE,
                     active: true,
+                }));
+                // The same look-around as head + move, so the right stick means one thing
+                // wherever it poses the head.
+                frame.push(proto::Call::RobotHead(proto::HeadParams {
+                    neck_pitch: 0.0,
+                    head_pitch: -right_y * args.max_head,
+                    head_yaw: -right_x * args.max_head,
+                    head_roll: 0.0,
                 }));
             }
         }
@@ -1586,8 +1598,9 @@ mod tests {
         );
     }
 
-    /// Leaving a mode puts back what it moved, and only that: body pose releases the body,
-    /// a head mode re-centres the head, and moving between the two head modes keeps the head.
+    /// Leaving a mode puts back what it moved, and only that: body + head releases the body,
+    /// leaving every head-posing mode for plain driving re-centres the head, and moving between
+    /// head-posing modes keeps it.
     #[test]
     fn leaving_a_mode_puts_back_what_it_moved() {
         let is_pose_off = |c: &proto::Call| matches!(c, proto::Call::RobotPose(p) if !p.active);
@@ -1596,16 +1609,25 @@ mod tests {
             |c: &proto::Call| matches!(c, proto::Call::RobotHead(h) if *h == centre);
 
         let calls = mode_exit_calls(Mode::BodyPose, Mode::Drive);
-        assert!(calls.len() == 1 && is_pose_off(&calls[0]), "{calls:?}");
+        assert!(
+            calls.len() == 2 && is_pose_off(&calls[0]) && is_head_centre(&calls[1]),
+            "{calls:?}"
+        );
+        for to in [Mode::Head, Mode::HeadDrive] {
+            let calls = mode_exit_calls(Mode::BodyPose, to);
+            assert!(
+                calls.len() == 1 && is_pose_off(&calls[0]),
+                "→ {to:?}: {calls:?}"
+            );
+        }
 
         for head in [Mode::Head, Mode::HeadDrive] {
-            for to in [Mode::Drive, Mode::BodyPose] {
-                let calls = mode_exit_calls(head, to);
-                assert!(
-                    calls.len() == 1 && is_head_centre(&calls[0]),
-                    "{head:?} → {to:?}: {calls:?}"
-                );
-            }
+            let calls = mode_exit_calls(head, Mode::Drive);
+            assert!(
+                calls.len() == 1 && is_head_centre(&calls[0]),
+                "{head:?}: {calls:?}"
+            );
+            assert!(mode_exit_calls(head, Mode::BodyPose).is_empty());
         }
 
         assert!(mode_exit_calls(Mode::Head, Mode::HeadDrive).is_empty());
