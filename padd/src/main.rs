@@ -36,7 +36,7 @@
 //! D-pad down      body + head — left stick crouches and leans sideways, right stick looks around
 //! Start           first press stands up, then toggles the policy
 //! Start, 1.5 s    home pose, motors stiff, policy off — a seated robot stays seated
-//! Select, 2 s     torque off
+//! Select, 2 s     torque off and reboot every servo
 //! Select, 4 s     power off, where it lies
 //! ```
 //!
@@ -201,7 +201,7 @@ const IDLE_POLL: Duration = Duration::from_millis(500);
 /// never reaches it, short enough to be the obvious thing to do when the robot is somewhere odd.
 const HOME_HOLD: Duration = Duration::from_millis(1500);
 
-/// Select held this long cuts torque — the robot drops, so hold it.
+/// Select held this long cuts torque and reboots every servo — the robot drops, so hold it.
 const RELAX_HOLD: Duration = Duration::from_secs(2);
 
 /// Select held this long powers the robot off. The hold has crossed [`RELAX_HOLD`] on the way, so
@@ -469,7 +469,7 @@ fn main() -> std::process::ExitCode {
         roller,
         "driving — A sit, B ground pick, LB/RB kicks, triggers mouth; D-pad up head, \
          right head + move, left move, down body + head; Start stands up then toggles the policy, \
-         Start (1.5s) home pose; Select (2s) torque off, Select (4s) power off"
+         Start (1.5s) home pose; Select (2s) torque off + servo reboot, Select (4s) power off"
     );
 
     let period = Duration::from_secs_f64(1.0 / args.hz as f64);
@@ -803,12 +803,18 @@ fn main() -> std::process::ExitCode {
                 tracing::info!("Select tapped — hold it 2 s to cut torque, 4 s to power off")
             }
             HoldAction::Reached(0) => {
-                tracing::warn!("Select held — robot.relax: torque off");
-                // Torque off leaves the robot limp, so the next Start stands it up again rather
-                // than toggling the policy on a robot that is lying on the floor.
+                tracing::warn!(
+                    "Select held — robot.rebootMotors: torque off and reboot every servo"
+                );
+                // A reboot rather than a bare relax: torque goes off first either way, and a
+                // servo that tripped its overload comes back with it — so the button that stops
+                // the robot is also the way out of a tripped servo without pulling the battery.
+                // The robot is left limp, so the next Start stands it up again rather than
+                // toggling the policy on a robot that is lying on the floor.
                 up = false;
-                if let Err(e) = request(&mut stream, &mut next_id, &proto::Call::RobotRelax) {
-                    tracing::error!(error = %e, "relax request failed");
+                let call = proto::Call::RobotRebootMotors(proto::RebootMotorsParams::default());
+                if let Err(e) = request(&mut stream, &mut next_id, &call) {
+                    tracing::error!(error = %e, "reboot request failed");
                     return std::process::ExitCode::FAILURE;
                 }
             }

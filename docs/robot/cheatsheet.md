@@ -520,7 +520,7 @@ the thumb:
 | **D-pad down** | body + head: left stick up/down rises and crouches, left/right leans the body sideways; right stick looks around (head yaw and pitch). The body does not walk |
 | **Start**, press | first press: torque on and a 2 s ramp to the home pose, then hold. Second press: the policy drives. After that it toggles the policy |
 | **Start**, held 1.5 s | home pose, motors stiff, policy off — the "put everything back" button, from anywhere. Sitting, it stays seated, stiff: A stands it up after the next Start |
-| **Select**, held 2 s | torque off (`robot.relax`). The robot drops, so hold it. Start stands it up again |
+| **Select**, held 2 s | torque off and every servo rebooted (`robot.rebootMotors`) — also the way back from a tripped overload without pulling the battery. The robot drops, so hold it. Start stands it up again |
 | **Select**, held 4 s | power off, where it lies — torque went at 2 s, so it does not sit first. The release afterwards does nothing more |
 
 **One move at a time.** A kick, a pick or a sit is refused while another is running, and a
