@@ -80,7 +80,7 @@ repo    = "pollen-robotics/microduck-gst-plugins"
 version = "v3"
 
 [workspace.package]
-version = "0.15.0"
+version = "0.15.1"
 edition = "2024"
 # 1.99 for the atomics' `try_update` (mediad), which replaced the now-deprecated
 # `fetch_update`. That also covers `std::fs::File::try_lock` (1.89), how the single-flight
