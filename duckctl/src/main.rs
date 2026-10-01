@@ -57,6 +57,15 @@ use futures::StreamExt;
 /// Generous, because BLE discovery is genuinely slow and a robot advertises at whatever interval
 /// BlueZ chose. Shorter than this and a laptop that was simply unlucky reports "no robot".
 const SCAN_TIME: Duration = Duration::from_secs(8);
+/// How much longer a scan listens once a robot has been heard without its name.
+///
+/// The name is only in the scan response, a second exchange a central can miss on its own
+/// ([`nothing_found`] has the byte budget), so a robot can be heard with its service UUID and no name.
+/// `scan` then lists it as `(no name)` and `--name` cannot match it — and the next run names it,
+/// because the OS keeps the name once it has one. Seen on macOS and Linux alike, and too rarely to
+/// pin down: `advwatch` has only ever measured the name arriving with the first packet. So the scan
+/// waits for the name rather than reporting the half it has, and costs nothing when the name came.
+const NAME_GRACE: Duration = Duration::from_secs(4);
 /// How often the scan results are re-read while waiting.
 ///
 /// A single snapshot after a fixed sleep is what this used to do, and it failed intermittently:
@@ -1488,8 +1497,11 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         // A listing is the exception, and runs the deadline out: stopping at the first robot would
         // report one and hide the second, which is the only question worth asking in a room with
         // three of them.
+        // Past the deadline only while a robot is still nameless, and then for [`NAME_GRACE`].
+        let nameless = seen.iter().any(|d| d.duck && d.local_name.is_none());
+        let now = Instant::now();
         if (!list_only && worth_connecting(&advertised, &named, &connected, &target))
-            || Instant::now() >= deadline
+            || (now >= deadline && (!nameless || now >= deadline + NAME_GRACE))
         {
             break;
         }
