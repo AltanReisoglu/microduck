@@ -246,7 +246,7 @@ all is `[duck_detector] enabled` in `robotctl configure`.
 No release, no file to edit, no restart:
 
 ```
-sudo robotctl policy load walk /home/radxa/my_walking.onnx
+sudo robotctl policy load walk /home/microduck/my_walking.onnx
 ```
 
 If the robot is walking, it goes to its home pose, loads it, and drives again. If it is doing
@@ -570,7 +570,7 @@ on the pad block instead of refusing. For a verdict over a window instead, copy 
 over from a clone of this repo:
 
 ```
-scp scripts/pad-link-test.sh radxa@<board>:/tmp/
+scp scripts/pad-link-test.sh microduck@<board>:/tmp/
 ```
 
 Drops already in `padd`'s journal — no pad needed, and it answers immediately:
@@ -593,7 +593,7 @@ the numbers.
 When two boards behave differently with the same pad, the difference is in the stack under it:
 
 ```
-scp scripts/pad-stack-report.sh radxa@<board>:/tmp/
+scp scripts/pad-stack-report.sh microduck@<board>:/tmp/
 ```
 
 ```
