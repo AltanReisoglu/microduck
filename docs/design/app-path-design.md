@@ -479,6 +479,41 @@ central that unsubscribes without disconnecting leaves `btd` registering a conne
 the kernel will not enable — BlueZ accepts the registration either way — which is the old behaviour
 until the link drops, and self-heals when it does.
 
+### 3.8 A Linux laptop connects through a second, extended advertisement  · **measured** (2026-10-01)
+
+`duckctl` on a Linux laptop (Intel BE200, BlueZ 5.64) found the robot and failed to connect every
+time — `le-connection-abort-by-local` on every attempt — while a Mac next to it connected first try. No bond
+on either side, nothing else holding the robot, and `btd`'s journal silent.
+
+HCI captures at both ends of the same attempts:
+
+| central | central hops with | robot hops with | result |
+|---|---|---|---|
+| Linux laptop, Intel BE200 | CSA #1 | **CSA #2** | `0x3e` Connection Failed to be Established, both ends, within 200 ms |
+| Mac | CSA #1 | CSA #1 | connects |
+
+Channel selection algorithm #2 is used only when **both** the advertisement and the connect request
+offer it. The laptop's controller supports #2 and still chose #1, so the robot's legacy advertisement
+does not offer it — and the AIC8800 hops with #2 anyway whenever the central offers it. The two ends
+then listen on different channels, lose each other, and give up below either host. Connection
+parameters are not it: a 2000 ms supervision timeout failed the same way.
+
+A connection made from an **extended** advertisement uses #2 at both ends by the spec, so the
+controller's choice is the right one there. Measured: the same laptop connected to an extended
+advertisement registered by hand, both ends on #2, discovered the duck service, and `duckctl info`
+answered.
+
+**So `btd` advertises twice while it is free to take a connection**: the legacy advertisement as
+before, which every central can scan, and an extended twin with the same payload, which is what a
+Linux laptop connects through. A busy robot drops the twin, since nothing connects through either.
+The twin's address field carries one more byte, `duck_ble::adv::EXTENDED_MARK`, because the two
+advertisements come from different random addresses and would otherwise be two robots with one
+name, which `duckctl` refuses as a collision. `duckctl` pairs them on name and address, keeps the
+twin, and waits up to a second for it once the legacy one has arrived.
+
+Not yet established: whether the Mac and the phone app see the extended advertisement, and which
+they connect through if they do. Either way they still have the legacy one.
+
 ## 5. Pairing: just-works, and a PIN the transport checks
 
 A six-digit PIN, stored by `configd`, checked by `btd` before it serves anything. **Not** by the

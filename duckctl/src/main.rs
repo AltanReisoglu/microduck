@@ -75,6 +75,14 @@ const NAME_GRACE: Duration = Duration::from_secs(4);
 /// finish in well under a second instead of always paying `SCAN_TIME`.
 const SCAN_POLL: Duration = Duration::from_millis(250);
 
+/// How long to keep scanning for a robot's extended advertisement once its legacy one has arrived.
+///
+/// A connection from the legacy advertisement fails on most Linux laptops (`btd`'s `advertise`
+/// explains why), so connecting the moment the legacy one is seen would throw the scan away. Seven
+/// to ten of `btd`'s advertising intervals; a robot from before the twin existed pays this once per
+/// command and is then connected to as before.
+const TWIN_GRACE: Duration = Duration::from_secs(1);
+
 /// How long to wait with **nothing at all arriving** before giving up on a request.
 ///
 /// Idle rather than total, and that distinction is what makes an update watchable. An apply takes
@@ -147,6 +155,8 @@ struct Seen {
     /// What the robot broadcast about its place on the network — see [`Address`], and `duck_ble::adv`
     /// for why four bytes of IPv4 and not the SSID too.
     address: Address,
+    /// Whether this is the extended twin of a robot's legacy advertisement — see [`one_per_robot`].
+    extended: bool,
 }
 
 /// What a device said about its IPv4 address, which is three answers rather than two.
@@ -364,6 +374,29 @@ fn resolve_pin(flag: Option<String>, var: Option<String>) -> String {
     flag.filter(|pin| !pin.is_empty())
         .or(var.filter(|pin| !pin.is_empty()))
         .unwrap_or_else(|| DEFAULT_PIN.to_owned())
+}
+
+/// The candidates with each robot's legacy advertisement dropped where its extended twin was seen.
+///
+/// `btd` advertises twice from two random addresses (`duck_ble::adv` says why), so without this one
+/// robot is two candidates with the same name, and [`choose`] refuses that as a collision. The twin is
+/// the one kept because it is the one a Linux laptop can connect through.
+///
+/// Paired on name *and* address rather than name alone: two robots that share a name are the
+/// collision `choose` exists to refuse, and they cannot share a LAN address.
+fn one_per_robot<T>(found: Vec<(T, String, Address, bool)>) -> Vec<(T, String)> {
+    let twins: Vec<(String, Address)> = found
+        .iter()
+        .filter(|(_, _, _, extended)| *extended)
+        .map(|(_, name, address, _)| (name.clone(), *address))
+        .collect();
+    found
+        .into_iter()
+        .filter(|(_, name, address, extended)| {
+            *extended || !twins.iter().any(|(n, a)| n == name && a == address)
+        })
+        .map(|(candidate, name, _, _)| (candidate, name))
+        .collect()
 }
 
 /// Which of the candidates to talk to, given what was asked for.
@@ -705,6 +738,23 @@ fn lists_others(verbose: bool, robots: usize) -> bool {
 /// What `scan` prints: the robots, and — per [`lists_others`] — everything else.
 async fn listing(seen: &[Seen], verbose: bool, target: &Target) -> String {
     let (robots, others): (Vec<&Seen>, Vec<&Seen>) = seen.iter().partition(|d| d.duck);
+    // One line per robot rather than per advertisement.
+    let robots: Vec<&Seen> = one_per_robot(
+        robots
+            .into_iter()
+            .map(|d| {
+                (
+                    d,
+                    d.local_name.clone().unwrap_or_default(),
+                    d.address,
+                    d.extended,
+                )
+            })
+            .collect(),
+    )
+    .into_iter()
+    .map(|(d, _)| d)
+    .collect();
     // Kept before `device_list` consumes the vector, since they decide the blocks below.
     let found = robots.len();
     let silent = robots
@@ -1428,11 +1478,16 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // The advertised service UUID is an *optimisation*, not the identity check — and treating it as
     // the latter broke as soon as the Mac bonded with the robot. The authoritative test is whether
     // it serves our characteristic, which is only knowable after connecting.
-    let mut advertised: Vec<(Peripheral, String)> = Vec::new();
+    let mut advertised: Vec<(Peripheral, String)>;
+    // Before [`one_per_robot`] collapses each robot's two advertisements into one.
+    let mut advertised_raw: Vec<(Peripheral, String, Address, bool)> = Vec::new();
+    let mut addresses_raw: Vec<(Address, String, Address, bool)> = Vec::new();
+    // When something worth connecting to first arrived, which starts [`TWIN_GRACE`].
+    let mut first_worth: Option<Instant> = None;
     // What each robot said about its address, beside the name it said it under — the two fields
     // `choose` needs, so `ip` inherits the collision rule every other command follows rather than
     // picking whichever robot the radio reported first.
-    let mut addresses: Vec<(Address, String)> = Vec::new();
+    let mut addresses: Vec<(Address, String)>;
     let mut named: Vec<(Peripheral, String)> = Vec::new();
     let mut connected: Vec<(Peripheral, String)> = Vec::new();
     // Everything the Mac reported, kept only so a failure can say what was in range. `configd`
@@ -1442,8 +1497,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let deadline = Instant::now() + SCAN_TIME;
 
     loop {
-        advertised.clear();
-        addresses.clear();
+        advertised_raw.clear();
+        addresses_raw.clear();
         named.clear();
         connected.clear();
         // Cleared with the tiers, and rebuilt from the same sweep: `peripherals()` reports
@@ -1462,8 +1517,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
             let duck = properties.services.contains(&SERVICE_UUID);
             let address = Address::read(&properties, duck);
+            let extended = duck && adv::is_extended(&properties.manufacturer_data);
             if duck {
-                addresses.push((address, name.clone()));
+                addresses_raw.push((address, name.clone(), address, extended));
             }
             seen.push(Seen {
                 peripheral: peripheral.clone(),
@@ -1472,6 +1528,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 services: properties.services.len(),
                 duck,
                 address,
+                extended,
             });
 
             if list_only {
@@ -1482,7 +1539,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             if duck {
-                advertised.push((peripheral, name));
+                advertised_raw.push((peripheral, name, address, extended));
             } else if target.wanted().is_some_and(|w| answers_to(&name, w)) {
                 named.push((peripheral, name));
             } else if target.wanted().is_none() && peripheral.is_connected().await? {
@@ -1494,15 +1551,32 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
+        // Whether the candidate already includes an extended twin, before the collapse hides which
+        // one survived. Without one, a legacy advertisement gets [`TWIN_GRACE`] for its twin to
+        // arrive; a bonded robot found by name alone has no twin to wait for.
+        let twin_seen = advertised_raw.iter().any(|(_, name, _, extended)| {
+            *extended
+                && target
+                    .wanted()
+                    .is_none_or(|wanted| answers_to(name, wanted))
+        });
+        advertised = one_per_robot(advertised_raw.clone());
+        addresses = one_per_robot(addresses_raw.clone());
+
         // A listing is the exception, and runs the deadline out: stopping at the first robot would
         // report one and hide the second, which is the only question worth asking in a room with
         // three of them.
+        let worth = !list_only && worth_connecting(&advertised, &named, &connected, &target);
+        if worth && first_worth.is_none() {
+            first_worth = Some(Instant::now());
+        }
+        let settled = twin_seen
+            || advertised.is_empty()
+            || first_worth.is_some_and(|first| first.elapsed() >= TWIN_GRACE);
         // Past the deadline only while a robot is still nameless, and then for [`NAME_GRACE`].
         let nameless = seen.iter().any(|d| d.duck && d.local_name.is_none());
         let now = Instant::now();
-        if (!list_only && worth_connecting(&advertised, &named, &connected, &target))
-            || (now >= deadline && (!nameless || now >= deadline + NAME_GRACE))
-        {
+        if (worth && settled) || (now >= deadline && (!nameless || now >= deadline + NAME_GRACE)) {
             break;
         }
         tokio::time::sleep(SCAN_POLL).await;
@@ -1600,7 +1674,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
          something else already holds it — the phone app, or another `duckctl` — because a robot \
          serving one central advertises non-connectably and is listed without being reachable. \
          Otherwise: if macOS shows it as paired, forget it there and retry; `sudo pkill \
-         bluetoothd` also clears a half-finished bond.",
+         bluetoothd` also clears a half-finished bond. On Linux, a robot whose release predates its \
+         extended advertisement fails here every time against most Intel controllers \
+         (`le-connection-abort-by-local`); update it from a Mac.",
         CONNECT_TIMEOUT,
         peripheral.connect(),
     )
@@ -2643,6 +2719,42 @@ mod tests {
         // Both are named, so the reader can tell which two collided.
         assert!(error.contains("radxa-zero3, radxa-zero3"), "{error}");
         assert!(error.contains("set-name"), "the way out: {error}");
+    }
+
+    /// A robot's two advertisements are one candidate, and the one kept is the extended twin.
+    #[test]
+    fn a_robots_twin_advertisements_are_one_candidate() {
+        let here = Address::At(Ipv4Addr::new(192, 168, 1, 42));
+        let found = vec![
+            ("legacy", "duck-c51b".to_owned(), here, false),
+            ("extended", "duck-c51b".to_owned(), here, true),
+        ];
+        assert_eq!(
+            one_per_robot(found),
+            vec![("extended", "duck-c51b".to_owned())]
+        );
+    }
+
+    /// Two robots under one name stay two, so `choose` still refuses them — a shared name is not a
+    /// shared robot, and only a shared address too pairs them.
+    #[test]
+    fn two_robots_under_one_name_are_not_twins() {
+        let one = Address::At(Ipv4Addr::new(192, 168, 1, 42));
+        let other = Address::At(Ipv4Addr::new(192, 168, 1, 43));
+        let found = vec![
+            ("a", "radxa-zero3".to_owned(), one, false),
+            ("b", "radxa-zero3".to_owned(), other, true),
+        ];
+        assert_eq!(one_per_robot(found).len(), 2);
+        let target = Target {
+            name: Some("radxa-zero3".to_owned()),
+            from_env: false,
+        };
+        let found = vec![
+            ("a", "radxa-zero3".to_owned(), one, true),
+            ("b", "radxa-zero3".to_owned(), other, true),
+        ];
+        choose(one_per_robot(found), &target).expect_err("still a collision");
     }
 
     /// A collision on a name from the environment says so. This is the failure where provenance
