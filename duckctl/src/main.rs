@@ -1141,7 +1141,7 @@ enum Command {
 /// that is the daemon with it.
 #[derive(Subcommand)]
 enum Pad {
-    /// What each of the five one-shot buttons runs.
+    /// What each of the six one-shot buttons runs.
     ///
     /// `overridden` marks what somebody changed; `error` marks a button bound to a skill this
     /// robot does not have, which is a button that will do nothing when pressed.
@@ -1152,7 +1152,7 @@ enum Pad {
     /// checked against this robot's skills first, so a typo is refused with the real list rather
     /// than becoming a dead button.
     Bind {
-        /// `a`, `x`, `lb`, `rb` or `dpad_down` — the bumpers, not the analog triggers.
+        /// `a`, `b`, `x`, `y`, `lb` or `rb` — the bumpers, not the analog triggers.
         button: String,
         /// A skill this robot has, or `""` to leave the button doing nothing.
         skill: String,

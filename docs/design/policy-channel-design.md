@@ -587,19 +587,19 @@ inheriting.
 
 ### 10.3 The button
 
-`[pad]` says which of the five one-shot buttons runs which skill:
+`[pad]` says which of the six one-shot buttons runs which skill:
 
 ```toml
 [pad]
 x = "polite-bow"
 ```
 
-`robotctl pad bindings` shows them, `pad bind` changes one, `pad reset` puts them back. The
-defaults are the mapping the prototype had, so a robot with no `[pad]` behaves as it always has,
-and `padd` re-reads the file within a second — nothing restarts.
+`robotctl pad bindings` shows them, `pad bind` changes one, `pad reset` puts them back. By
+default A sits, B picks up, the bumpers kick and X and Y are free, and `padd` re-reads the file
+within a second — nothing restarts.
 
-Only those five. `Start`, the two stick-mode toggles, held `Select` and held `D-pad up` are not
-`robot.do` calls, and the button that powers a robot off is the one binding worth not being able
+Only those six — the face buttons and the bumpers. `Start`, the D-pad's stick modes and held
+`Select` are not `robot.do` calls, and the button that powers a robot off is the one binding worth not being able
 to lose to a config edit.
 
 **Over the wire, `pad.bindings` and `pad.bind` are `robotd`'s**, not `configd`'s, which owns the

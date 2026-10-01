@@ -94,18 +94,19 @@ pub struct Params {
 /// Controller-IMU head control: pose the head by tilting the pad.
 ///
 /// Some pads carry an inertial unit — the "Pro Controller" Switch clones do; an Xbox pad does not.
-/// With this on and such a pad connected, **Y** stops meaning "the sticks pose the head" and
-/// means "the pad's tilt poses the head": the sticks keep driving, and turning the pad in your
-/// hands turns the robot's head. Press Y again and the head holds where it is, still driving.
-/// Press it a third time and the pad drives the head again **from where the pad is now** — the
-/// pad's yaw comes from a gyro and drifts, and re-centring on every re-entry is how a person
-/// beats the drift without a magnetometer.
+/// With this on and such a pad connected, head + move mode (**D-pad right**) stops meaning "the
+/// right stick poses the head" and means "the pad's tilt poses the head": the sticks keep the
+/// whole drive mapping, and turning the pad in your hands turns the robot's head. Press D-pad
+/// right again and the pad drives the head **from where the pad is now** — the pad's yaw comes
+/// from a gyro and drifts, and re-centring on every press is how a person beats the drift
+/// without a magnetometer.
 ///
-/// Off, or on a pad with no IMU, Y is what it always was. Nothing else about the pad changes.
+/// Off, or on a pad with no IMU, the right stick poses the head in that mode. Nothing else about
+/// the pad changes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct PadImuHeadControlParams {
-    /// Whether Y engages IMU head control on a pad that has an IMU.
+    /// Whether head + move mode follows the pad's IMU on a pad that has one.
     pub enabled: bool,
     /// Head radians per pad radian. One is "the head turns as far as the pad did"; more makes a
     /// small wrist movement a large head movement. The head's own travel limit still applies.
@@ -123,16 +124,16 @@ impl Default for PadImuHeadControlParams {
 
 /// Which pad button runs which skill.
 ///
-/// **The five one-shot buttons, and only those.** `Start` toggles the policy, `Y` and `B` switch
-/// what the sticks mean, held `Select` powers the robot off and held `D-pad up` changes drive
-/// mode — none of those is a `robot.do`, and turning them into a general button-to-action
-/// vocabulary is a larger thing than binding a skill needs. It would also put "the button that
-/// stops the robot" behind a config key, which is the one binding worth not being able to lose.
+/// **The six one-shot buttons, and only those:** the four face buttons and the two bumpers.
+/// `Start` stands the robot up and toggles the policy, the D-pad picks what the sticks mean, and
+/// held `Select` cuts torque and then powers the robot off — none of those is a `robot.do`, and
+/// turning them into a general button-to-action vocabulary is a larger thing than binding a skill
+/// needs. It would also put "the button that stops the robot" behind a config key, which is the
+/// one binding worth not being able to lose.
 ///
-/// Empty means the mapping the prototype had and muscle memory expects. A named button is
-/// rebound; the rest stay as they were. The pad is full — every face button already does
-/// something — so binding a new skill nearly always means taking a button from an old one, which
-/// is why every one of the five is nameable rather than only the free ones.
+/// The defaults keep the pad sparse on purpose: A sits or stands, B picks up, the bumpers kick,
+/// and X and Y do nothing until somebody puts a skill there. A named button is rebound; the rest
+/// stay as they were.
 ///
 /// A name here is not checked against anything at parse time: which skills exist is a property of
 /// the robot, and `padd` learns it from `robot.subscribe`. An unknown name is refused by `robotd`
@@ -140,43 +141,48 @@ impl Default for PadImuHeadControlParams {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct PadParams {
-    /// A (South). The ground pick, by default.
+    /// A (South). Sit ↔ stand, by default.
     pub a: String,
-    /// B (East) is body-pose mode and is not bindable; X (West) is the roulade.
+    /// B (East). The ground pick, by default.
+    pub b: String,
+    /// X (West). Free by default. Held, it is re-sent every tick, so a chaining skill such as
+    /// the roulade keeps going for as long as it is held.
     pub x: String,
+    /// Y (North). Free by default.
+    pub y: String,
     /// The left bumper — `LeftTrigger` in gilrs, which names the *analog* trigger
     /// `LeftTrigger2`. Getting that backwards binds a skill to a control nobody presses.
     pub lb: String,
     /// The right bumper, likewise.
     pub rb: String,
-    /// D-pad down. The sit toggle, by default.
-    pub dpad_down: String,
 }
 
 impl Default for PadParams {
     fn default() -> Self {
         Self {
-            a: "ground_pick".to_owned(),
-            x: "roulade".to_owned(),
+            a: "sit_toggle".to_owned(),
+            b: "ground_pick".to_owned(),
+            x: String::new(),
+            y: String::new(),
             lb: "kick_left".to_owned(),
             rb: "kick_right".to_owned(),
-            dpad_down: "sit_toggle".to_owned(),
         }
     }
 }
 
 impl PadParams {
     /// The bindable buttons, in the order a listing should print them.
-    pub const BUTTONS: [&'static str; 5] = ["a", "x", "lb", "rb", "dpad_down"];
+    pub const BUTTONS: [&'static str; 6] = ["a", "b", "x", "y", "lb", "rb"];
 
     /// What a button runs, or `None` for a name this build has no button for.
     pub fn skill(&self, button: &str) -> Option<&str> {
         Some(match button {
             "a" => &self.a,
+            "b" => &self.b,
             "x" => &self.x,
+            "y" => &self.y,
             "lb" => &self.lb,
             "rb" => &self.rb,
-            "dpad_down" => &self.dpad_down,
             _ => return None,
         })
     }
@@ -185,10 +191,11 @@ impl PadParams {
     pub fn bind(&mut self, button: &str, skill: &str) -> bool {
         let slot = match button {
             "a" => &mut self.a,
+            "b" => &mut self.b,
             "x" => &mut self.x,
+            "y" => &mut self.y,
             "lb" => &mut self.lb,
             "rb" => &mut self.rb,
-            "dpad_down" => &mut self.dpad_down,
             _ => return false,
         };
         *slot = skill.to_owned();
@@ -2399,16 +2406,25 @@ mod tests {
         );
     }
 
-    /// **A robot with no `[pad]` behaves exactly as it always has.** The mapping is the
-    /// prototype's and muscle memory depends on it, so the defaults are not a fresh choice.
+    /// The shipped mapping: A sits, B picks up, the bumpers kick, X and Y are free.
     #[test]
-    fn the_default_bindings_are_the_prototypes() {
+    fn the_default_bindings() {
         let pad = super::PadParams::default();
-        assert_eq!(pad.a, "ground_pick");
-        assert_eq!(pad.x, "roulade");
+        assert_eq!(pad.a, "sit_toggle");
+        assert_eq!(pad.b, "ground_pick");
+        assert_eq!(pad.x, "");
+        assert_eq!(pad.y, "");
         assert_eq!(pad.lb, "kick_left");
         assert_eq!(pad.rb, "kick_right");
-        assert_eq!(pad.dpad_down, "sit_toggle");
+    }
+
+    /// **The D-pad stopped being bindable, and a robot still carrying the old key boots.** It is
+    /// an unknown key now, so it is ignored and named rather than refusing the whole file.
+    #[test]
+    fn the_retired_dpad_down_binding_is_ignored_and_named() {
+        let (_, ignored) =
+            super::without_unknown_keys("[pad]\ndpad_down = \"sit_toggle\"\n").unwrap();
+        assert_eq!(ignored, ["pad.dpad_down"]);
     }
 
     /// Binding one button leaves the rest alone — the file is a list of decisions, and rebinding
@@ -2419,15 +2435,15 @@ mod tests {
             toml::from_str("[pad]\nx = \"polite-bow\"\n").expect("a pad section");
         assert_eq!(params.pad.x, "polite-bow");
         assert_eq!(params.pad.lb, "kick_left", "untouched");
-        assert_eq!(params.pad.a, "ground_pick", "untouched");
+        assert_eq!(params.pad.a, "sit_toggle", "untouched");
     }
 
     /// An empty binding is a button switched off on purpose, which is different from a button
     /// bound to something that does not exist — `padd` sends nothing rather than a bad name.
     #[test]
     fn an_empty_binding_is_a_button_switched_off() {
-        let params: super::Params = toml::from_str("[pad]\ndpad_down = \"\"\n").unwrap();
-        assert_eq!(params.pad.skill("dpad_down"), Some(""));
+        let params: super::Params = toml::from_str("[pad]\nb = \"\"\n").unwrap();
+        assert_eq!(params.pad.skill("b"), Some(""));
         assert_eq!(params.pad.skill("nonsense"), None, "not a button at all");
     }
 

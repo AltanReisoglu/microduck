@@ -9,35 +9,41 @@
 //! the way an API only the phone app uses inevitably would. The cost is a socket hop: tens
 //! of microseconds against a 20 ms tick.
 //!
-//! ## The mapping is the prototype's, and now it is config
+//! ## The mapping
 //!
-//! Muscle memory carries over from `microduck_runtime`, and the five one-shot buttons are
-//! `[pad]` in `robotd.toml` — so a robot that has learned a new skill can put it on a button
-//! without a release. The defaults are exactly the mapping below, so a robot with no `[pad]`
-//! section behaves as it always has.
+//! Laid out so that each part of the pad has one job: the face buttons and bumpers run skills,
+//! the D-pad picks what the sticks mean, and the two small buttons in the middle are holds —
+//! nothing that cuts torque or powers the robot off fires on a brush of the thumb.
 //!
-//! Only those five. `Start`, the two mode toggles, held `Select` and held `D-pad up` are not
-//! `robot.do` calls, and the button that powers a robot off is the one binding worth not being
-//! able to lose to a config edit.
+//! The six one-shot buttons are `[pad]` in `robotd.toml`, so a robot that has learned a new skill
+//! can put it on a button without a release. Only those six: `Start`, the D-pad and held `Select`
+//! are not `robot.do` calls, and the button that powers a robot off is the one binding worth not
+//! being able to lose to a config edit.
 //!
 //! This daemon still knows nothing about what a skill *is*. It reads which button went down,
 //! looks up the name beside it, and sends that name; `robotd` decides whether the robot has such
 //! a thing and answers with the list it does have when it does not.
 //!
 //! ```text
-//! Start        toggle the policy
-//! Y (North)    head mode — sticks pose the head
-//! B (East)     body-pose mode — sticks lean and crouch the standing robot
-//! A (South)    ground pick
-//! LB / RB      left / right kick
-//! DPad-Down    sit ↔ stand
-//! RT / LT      mouth (either trigger; the max wins) · RT quacks · LT rides the wheee
-//! Select       torque off, on release — the emergency stop
-//! Select, 2 s  sit down, torque off, then power off — the release does nothing more
+//! A (South)       sit ↔ stand
+//! B (East)        ground pick
+//! X / Y           nothing, until a skill is bound there
+//! LB / RB         left / right kick
+//! RT / LT         mouth (either trigger; the max wins) · RT quacks · LT rides the wheee
+//! D-pad up        head mode — the sticks pose the head, the body holds still
+//! D-pad right     head + move — left stick walks and turns, right stick looks around
+//! D-pad left      move — the sticks walk, strafe and turn
+//! D-pad down      body pose — the sticks lean and crouch the standing robot
+//! Start           first press stands up, then toggles the policy
+//! Start, 1.5 s    home pose, motors stiff, policy off
+//! Select, 2 s     torque off
+//! Select, 4 s     sit down if it can, then power off
 //! ```
 //!
-//! Head and body-pose mode both zero the velocity while active, as the prototype does — a
-//! robot that keeps walking because you started posing its head is a bad surprise.
+//! The D-pad *selects* a mode rather than toggling one, so a press always lands where its arrow
+//! says whatever mode the robot was in. Head and body-pose mode both zero the velocity while
+//! active — a robot that keeps walking because you started posing its head is a bad surprise —
+//! and leaving a mode puts back what it moved: the body snaps to nominal, the head re-centres.
 //!
 //! Smoothing lives in `robotd` (`[control] cmd_alpha` / `head_alpha`), not here: this
 //! process sends raw targets, so every client gets the same feel.
@@ -46,8 +52,9 @@
 //!
 //! At startup this asks `robot.mode`. On a roller robot the stick mapping becomes the
 //! prototype's roller preset — asymmetric forward/brake (0.6 / 0.5), no strafe, ±0.3 rad/s
-//! heading — and A triggers the crouch that lives in the ground-pick slot. The other
-//! skills ride along on wheels, as the rebased roller line has them.
+//! heading — and B triggers the crouch that lives in the ground-pick slot. The other
+//! skills ride along on wheels, as the rebased roller line has them. Switching between walk and
+//! roller is `robot.setMode`; it is no longer on the pad.
 //!
 //! ## On the robot, this runs itself
 //!
@@ -189,79 +196,91 @@ struct Args {
 /// switches a pad on and is not a background load.
 const IDLE_POLL: Duration = Duration::from_millis(500);
 
-/// Select held this long sits the robot down and powers it off.
-const SHUTDOWN_HOLD: Duration = Duration::from_secs(2);
+/// Start held this long brings the robot to its home pose with the motors stiff and the policy
+/// off: the "put everything back" button. Long enough that a press meant for the policy toggle
+/// never reaches it, short enough to be the obvious thing to do when the robot is somewhere odd.
+const HOME_HOLD: Duration = Duration::from_millis(1500);
 
-/// The Select button, which does one of two things depending on how long it was held — and so
-/// has to wait for the release to know which.
+/// Select held this long cuts torque — the robot drops, so hold it.
+const RELAX_HOLD: Duration = Duration::from_secs(2);
+
+/// Select held this long powers the robot off. The hold has crossed [`RELAX_HOLD`] on the way, so
+/// the robot is already limp and powers off where it lies rather than sitting first — `robotd`'s
+/// shutdown skips the sit on a robot that is not driving.
+const SHUTDOWN_HOLD: Duration = Duration::from_secs(4);
+
+/// A button that does different things depending on how long it is held.
 ///
-/// A short press is the emergency stop: `robot.relax`, torque off, the robot drops. Held for
-/// [`SHUTDOWN_HOLD`] it is the shutdown sequence instead: sit down, torque off, power off. The two
-/// cannot both fire — a robot that has already gone limp cannot sit — so the stop is sent **on
-/// release**, and only if the hold never reached the shutdown. The cost is that the stop lands
-/// when the thumb comes off rather than when it goes down, which for a button somebody presses
-/// and lets go of is the same instant.
+/// Each threshold fires once, on the tick the hold crosses it, so a longer hold walks through
+/// every shorter one on the way — Select cuts torque at two seconds and then powers off at four.
+/// A release that crossed no threshold is a [`HoldAction::Tap`]; the release after a hold that
+/// did fire says nothing, because the thumb coming off is not a second request.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-struct SelectButton {
+struct HoldButton {
     /// When the current hold began. `None` between presses.
     held_since: Option<Instant>,
-    /// The shutdown was sent for this hold, so its release is not a stop.
-    shutdown_sent: bool,
+    /// How many thresholds this hold has crossed.
+    fired: usize,
+    /// The pad went away during a hold that had already fired. Whatever is still held when it
+    /// comes back is the tail of that hold, and does nothing until the release.
+    spent: bool,
 }
 
-/// What Select asks for this tick.
+/// What a [`HoldButton`] asks for this tick.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SelectAction {
+enum HoldAction {
     Nothing,
-    /// Held long enough: sit, torque off, power off. Once per hold.
-    Shutdown,
-    /// Let go before that: torque off now.
-    Relax,
+    /// Pressed and let go before the first threshold.
+    Tap,
+    /// The hold just crossed this threshold, by index.
+    Reached(usize),
 }
 
-impl SelectButton {
+impl HoldButton {
     /// One tick: is the button down now, and did it come up since the last tick.
     ///
     /// `released` is the edge from the event queue, because a press and release inside one tick
-    /// leaves `pressed` false on both sides and would otherwise be a stop nobody saw.
-    fn tick(&mut self, pressed: bool, released: bool, now: Instant) -> SelectAction {
+    /// leaves `pressed` false on both sides and would otherwise be a tap nobody saw.
+    fn tick(
+        &mut self,
+        pressed: bool,
+        released: bool,
+        now: Instant,
+        thresholds: &[Duration],
+    ) -> HoldAction {
         if pressed {
             let since = *self.held_since.get_or_insert(now);
-            if now.duration_since(since) >= SHUTDOWN_HOLD && !self.shutdown_sent {
-                self.shutdown_sent = true;
-                return SelectAction::Shutdown;
+            if !self.spent
+                && let Some(&next) = thresholds.get(self.fired)
+                && now.duration_since(since) >= next
+            {
+                self.fired += 1;
+                return HoldAction::Reached(self.fired - 1);
             }
-            return SelectAction::Nothing;
+            return HoldAction::Nothing;
         }
-        let was_shutdown = self.shutdown_sent;
-        self.held_since = None;
-        self.shutdown_sent = false;
-        if released && !was_shutdown {
-            return SelectAction::Relax;
+        let acted = self.fired > 0 || self.spent;
+        *self = Self::default();
+        if released && !acted {
+            return HoldAction::Tap;
         }
-        // A release after the shutdown, or a tick with nothing to say.
-        SelectAction::Nothing
+        HoldAction::Nothing
     }
 
     /// Forget a hold in flight. Called when the pad goes away: the hold's start was measured
-    /// against *that* pad's button, and carrying it onto the next pad would turn a Select
-    /// still held across a long dropout into a shutdown on the first tick back.
+    /// against *that* pad's button, and carrying it onto the next pad would turn a button still
+    /// held across a long dropout into its longest action on the first tick back.
     ///
-    /// `shutdown_sent` survives, because it is a fact about the robot rather than about the
-    /// pad: the shutdown went out, the robot is sitting down, and the release that follows
-    /// must stay silent whether or not the pad blinked in between. Clearing it here would
-    /// hand that release back to the stop and drop a robot mid-sit.
+    /// A hold that already fired is marked spent rather than forgotten, because what it did is a
+    /// fact about the robot rather than about the pad: the release that follows must stay silent,
+    /// and the rest of the hold must not reach the next threshold from a fresh start.
     fn reset(&mut self) {
         self.held_since = None;
+        if self.fired > 0 {
+            self.spent = true;
+        }
     }
 }
-
-/// D-pad up held this long switches drive mode, walk ⇄ roller.
-///
-/// Three seconds, longer than the shutdown hold, and the prototype's number. D-pad up is a
-/// direction anybody might lean on for a moment while driving; the mode switch takes the robot
-/// home and reloads its policies, so it has to be a hold nobody performs by accident.
-const MODE_HOLD: Duration = Duration::from_secs(3);
 
 /// Body-pose stick ranges, from the training env via the prototype: z is asymmetric
 /// (little headroom up at the standing height, more crouch down), angles capped at ~15°.
@@ -276,13 +295,46 @@ const ROLLER_PUSH: f64 = 0.6;
 const ROLLER_BRAKE: f64 = 0.5;
 const ROLLER_YAW: f64 = 0.3;
 
-/// What the sticks drive. Head and body-pose are modal because two sticks cannot express
-/// nine degrees of freedom; the toggles are the prototype's Y and B buttons.
+/// What the sticks drive, picked on the D-pad. Modal because two sticks cannot express nine
+/// degrees of freedom.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mode {
+    /// D-pad left. Left stick walks and strafes, right stick turns.
     Drive,
+    /// D-pad up. All four axes pose the head; the body holds still.
     Head,
+    /// D-pad right. Left stick walks and turns, right stick looks around — or, with
+    /// `[pad_imu_head_control]` on a pad that has an IMU, the pad's tilt poses the head and the
+    /// sticks keep the whole [`Mode::Drive`] mapping.
+    HeadDrive,
+    /// D-pad down. The sticks lean and crouch the standing robot.
     BodyPose,
+}
+
+impl Mode {
+    /// Whether this mode sends head poses, so leaving it has a head to put back.
+    fn poses_head(self) -> bool {
+        matches!(self, Self::Head | Self::HeadDrive)
+    }
+}
+
+/// What has to be sent when the sticks stop meaning `from` and start meaning `to`.
+///
+/// Leaving a mode puts back what it moved, because nothing else will: a body left leaning or a
+/// head left turned stays that way, and the next mode does not send the joints the last one did.
+/// Moving between the two head modes keeps the head, since both go on posing it.
+fn mode_exit_calls(from: Mode, to: Mode) -> Vec<proto::Call> {
+    let mut calls = Vec::new();
+    if from == Mode::BodyPose && to != Mode::BodyPose {
+        calls.push(proto::Call::RobotPose(proto::PoseParams {
+            active: false,
+            ..Default::default()
+        }));
+    }
+    if from.poses_head() && !to.poses_head() {
+        calls.push(proto::Call::RobotHead(proto::HeadParams::default()));
+    }
+    calls
 }
 
 /// How often to look for a rewritten config. See the loop.
@@ -305,8 +357,7 @@ fn read_bindings(
             let pad = params.pad;
             let imu_head = params.pad_imu_head_control;
             tracing::info!(
-                a = %pad.a, x = %pad.x, lb = %pad.lb, rb = %pad.rb,
-                dpad_down = %pad.dpad_down,
+                a = %pad.a, b = %pad.b, x = %pad.x, y = %pad.y, lb = %pad.lb, rb = %pad.rb,
                 pad_imu_head_control = imu_head.enabled, pad_imu_head_gain = imu_head.gain,
                 "button bindings"
             );
@@ -322,32 +373,6 @@ fn read_bindings(
                 robotd_params::PadParams::default(),
                 robotd_params::PadImuHeadControlParams::default(),
             )
-        }
-    }
-}
-
-/// Where the pad's IMU stands in relation to the head. See `[pad_imu_head_control]` in `robotd-params`.
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum PadImuHead {
-    /// Y means what it always did.
-    Off,
-    /// The head follows the pad's attitude relative to `reference`, the attitude at the press
-    /// that started this. The sticks keep driving.
-    Following { reference: [f32; 4] },
-    /// The head stays where the last pose left it; nothing is sent for it. The sticks drive.
-    Holding,
-}
-
-impl PadImuHead {
-    /// Y was pressed with an IMU pad and the feature on. Off or holding → follow **from here**,
-    /// which is what beats the gyro's yaw drift: every re-entry makes the pad's current attitude
-    /// the new centre. Following → hold.
-    fn on_y(self, attitude: [f32; 4]) -> Self {
-        match self {
-            Self::Off | Self::Holding => Self::Following {
-                reference: attitude,
-            },
-            Self::Following { .. } => Self::Holding,
         }
     }
 }
@@ -426,29 +451,29 @@ fn main() -> std::process::ExitCode {
 
     let mut next_id = 1u64;
 
-    // Which robot is this? A roller duck wants the roller stick shaping. Asked once at startup,
-    // then kept in step by the D-pad-up switch below — which is this process asking for the
-    // change, so it knows the answer without asking again.
-    let mut roller = match request(&mut stream, &mut next_id, &proto::Call::RobotMode) {
-        Ok(Some(answer)) => match answer.result_as::<proto::ModeResult>() {
-            Ok(mode) => mode.mode == "roller",
-            Err(_) => false,
-        },
-        _ => false,
+    // Which robot is this? A roller duck wants the roller stick shaping. Asked at startup and then
+    // again with the config check below, so a `robot.setMode` from anywhere — the pad no longer
+    // switches modes itself — changes the stick shaping within a second.
+    let mut roller = match ask_roller(&mut stream, &mut next_id) {
+        Ok(roller) => roller.unwrap_or(false),
+        Err(e) => {
+            tracing::error!(error = %e, "mode request failed");
+            return std::process::ExitCode::FAILURE;
+        }
     };
     tracing::warn!(
         socket = %args.socket.display(),
         hz = args.hz,
         roller,
-        "driving — Start once stands up, Start again toggles the policy, Y head mode, B body pose, \
-         A ground pick, LB/RB kicks, DPad-Down sit, triggers mouth, DPad-Right reboot servos, \
-         DPad-Up (3s) walk/roller, Select (release) torque off, Select (2s) sit and shutdown"
+        "driving — A sit, B ground pick, LB/RB kicks, triggers mouth; D-pad up head, \
+         right head + move, left move, down body pose; Start stands up then toggles the policy, \
+         Start (1.5s) home pose; Select (2s) torque off, Select (4s) power off"
     );
 
     let period = Duration::from_secs_f64(1.0 / args.hz as f64);
     // The button bindings, read once like every other daemon reads its config. A file that will
-    // not parse is not a reason to leave somebody without a pad: the mapping the prototype had is
-    // the fallback, and the reason is logged.
+    // not parse is not a reason to leave somebody without a pad: the default mapping is the
+    // fallback, and the reason is logged.
     let (mut bindings, mut imu_head_cfg) = read_bindings(&args.config);
     // When the file was last written, so a change is picked up without a restart. `padd` holds
     // no motor control and no session state — the whole of it is this table — so re-reading is a
@@ -457,14 +482,14 @@ fn main() -> std::process::ExitCode {
     let mut bindings_checked = Instant::now();
 
     let mut mode = Mode::Drive;
-    // IMU head control, when `[pad_imu_head_control]` is on and the pad has one. Off whenever the pad is
+    // The pad attitude that reads as "head centred" while head + move follows the pad's IMU.
+    // `None` whenever it is not following — another mode, the feature off, no IMU, or the pad
     // gone: a reference taken against one pad means nothing to the next.
-    let mut imu_head = PadImuHead::Off;
+    let mut imu_reference: Option<[f32; 4]> = None;
     // Whether a pad was there last tick, so appearing and disappearing are each logged once.
     let mut driving = false;
-    let mut select = SelectButton::default();
-    let mut dpad_up_held_since: Option<Instant> = None;
-    let mut mode_switch_sent = false;
+    let mut start = HoldButton::default();
+    let mut select = HoldButton::default();
     // Trigger levels last tick, for the sound edges: RT quacks on its rising edge, LT
     // starts the wheee ride. The prototype's threshold.
     let mut prev_rt = 0.0f64;
@@ -492,56 +517,62 @@ fn main() -> std::process::ExitCode {
                 (bindings, imu_head_cfg) = read_bindings(&args.config);
                 tracing::warn!("button bindings reloaded");
             }
+            match ask_roller(&mut stream, &mut next_id) {
+                Ok(Some(now)) if now != roller => {
+                    roller = now;
+                    tracing::warn!(roller, "drive mode changed — stick shaping follows");
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::error!(error = %e, "mode request failed");
+                    return std::process::ExitCode::FAILURE;
+                }
+            }
         }
 
         // Drain the queue so axis polling below sees present state, and catch button
-        // *edges* — a held Start must toggle once, not fifty times a second.
+        // *edges* — a held D-pad must select once, not fifty times a second.
         //
         // The driving pad is the first one, and only its events may act: with two pads
         // connected, a Start or Select from the *other* one would otherwise steer a robot
         // whose sticks belong to somebody else.
         let pad_id = gilrs.gamepads().next().map(|(id, _)| id);
-        let mut toggle_enable = false;
-        let mut toggle_head = false;
-        let mut toggle_body = false;
+        let mut wanted_mode: Option<Mode> = None;
         // Which bindable buttons went down this tick, by their config name. A list rather than
         // a flag apiece, because what each one runs is config now and this loop no longer knows.
         let mut pressed: Vec<&'static str> = Vec::new();
-        let mut relax = false;
+        let mut start_released = false;
         let mut select_released = false;
-        let mut reboot_motors = false;
         while let Some(event) = gilrs.next_event() {
             if Some(event.id) != pad_id {
                 continue;
             }
-            // Select is the one button read on its release: a short press stops, a long hold shuts
-            // down, and which it was is only known when the thumb comes off.
-            if let gilrs::EventType::ButtonReleased(Button::Select, _) = event.event {
-                select_released = true;
-            }
-            if let gilrs::EventType::ButtonPressed(button, _) = event.event {
-                match button {
-                    Button::Start => toggle_enable = true,
-                    Button::North => toggle_head = true,
-                    Button::East => toggle_body = true,
-                    // The five bindable ones. What each runs is `[pad]` in the config; this
+            match event.event {
+                // Start and Select are holds: what they do depends on how long they stay down,
+                // so they are read off their state every tick and their release here.
+                gilrs::EventType::ButtonReleased(Button::Start, _) => start_released = true,
+                gilrs::EventType::ButtonReleased(Button::Select, _) => select_released = true,
+                gilrs::EventType::ButtonPressed(button, _) => match button {
+                    // The six bindable ones. What each runs is `[pad]` in the config; this
                     // only knows which physical control was pressed.
                     //
                     // gilrs names the *bumpers* `LeftTrigger`/`RightTrigger`; the analog
                     // triggers are `LeftTrigger2`/`RightTrigger2`. Getting that backwards binds
                     // a skill to a control nobody presses.
                     Button::South => pressed.push("a"),
+                    Button::East => pressed.push("b"),
                     Button::West => pressed.push("x"),
+                    Button::North => pressed.push("y"),
                     Button::LeftTrigger => pressed.push("lb"),
                     Button::RightTrigger => pressed.push("rb"),
-                    Button::DPadDown => pressed.push("dpad_down"),
-                    // Select is handled on release — see `SelectButton`.
-                    Button::Select => {}
-                    // Reboot the servos: the way back from a tripped overload without pulling
-                    // the battery.
-                    Button::DPadRight => reboot_motors = true,
+                    // The D-pad picks what the sticks mean.
+                    Button::DPadUp => wanted_mode = Some(Mode::Head),
+                    Button::DPadRight => wanted_mode = Some(Mode::HeadDrive),
+                    Button::DPadLeft => wanted_mode = Some(Mode::Drive),
+                    Button::DPadDown => wanted_mode = Some(Mode::BodyPose),
                     _ => {}
-                }
+                },
+                _ => {}
             }
         }
 
@@ -561,12 +592,11 @@ fn main() -> std::process::ExitCode {
                 driving = false;
             }
             // A hold in flight was measured against the pad that just left: drop it, or a
-            // Select (or D-pad up) still down when the pad returns lands its full hold time
-            // at once — a shutdown or a mode switch nobody asked for.
+            // Select still down when the pad returns lands its full hold time at once — a
+            // power-off nobody asked for.
+            start.reset();
             select.reset();
-            dpad_up_held_since = None;
-            mode_switch_sent = false;
-            imu_head = PadImuHead::Off;
+            imu_reference = None;
             if let Some(tap) = tap.as_ref() {
                 tap.idle();
             }
@@ -590,107 +620,124 @@ fn main() -> std::process::ExitCode {
         }
 
         // The pad's attitude this tick, when the feature is on and the pad has an IMU that has
-        // said something believable. `None` is every other case, and Y then means the sticks.
+        // said something believable. `None` is every other case, and head + move then poses the
+        // head from the right stick.
         let attitude = if imu_head_cfg.enabled {
             tap.as_ref().and_then(|tap| tap.attitude())
         } else {
             None
         };
-        if attitude.is_none() && imu_head != PadImuHead::Off {
+        if attitude.is_none() && imu_reference.is_some() {
             // The feature went off, or the IMU went away under us. Not silent: a head that stops
             // following mid-turn wants a line in the journal saying why.
-            tracing::info!("IMU head control off — no attitude to follow");
-            imu_head = PadImuHead::Off;
+            tracing::info!("IMU head control off — the right stick poses the head");
+            imu_reference = None;
         }
 
-        if toggle_head {
-            match attitude {
-                Some(attitude) => {
-                    // Y is the IMU's. The sticks never pose the head while this is possible: two
-                    // sources for one joint set is a head that shakes.
-                    if mode == Mode::Head {
-                        mode = Mode::Drive;
+        // Start: a tap stands the robot up, then toggles the policy; held, it is the way home.
+        let mut go_home = false;
+        match start.tick(
+            pad.is_pressed(Button::Start),
+            start_released,
+            tick,
+            &[HOME_HOLD],
+        ) {
+            HoldAction::Nothing => {}
+            HoldAction::Reached(_) => go_home = true,
+            HoldAction::Tap if !up => {
+                tracing::warn!("Start — robot.init: standing up. Press Start again to drive");
+                match request(&mut stream, &mut next_id, &proto::Call::RobotInit) {
+                    Err(e) => {
+                        tracing::error!(error = %e, "init failed");
+                        return std::process::ExitCode::FAILURE;
                     }
-                    imu_head = imu_head.on_y(attitude);
-                    match imu_head {
-                        PadImuHead::Following { .. } => tracing::info!(
-                            "IMU head control: following the pad from here — sticks keep driving"
-                        ),
-                        PadImuHead::Holding => {
-                            tracing::info!("IMU head control: holding the head where it is")
-                        }
-                        PadImuHead::Off => {}
-                    }
+                    Ok(_) => up = true,
                 }
-                None => {
-                    if imu_head_cfg.enabled && tap.as_ref().is_some_and(|tap| tap.has_imu()) {
-                        // The IMU is there and has not spoken yet — a second after connecting,
-                        // typically. Saying so beats silently doing the other thing.
-                        tracing::warn!(
-                            "the pad's IMU has no attitude yet; Y is stick head mode this once"
-                        );
+            }
+            HoldAction::Tap => {
+                // The robot owns the toggle. A local on/off belief here drifts from the
+                // robot's the moment anything else moves it — robot.relax, the shutdown
+                // sequence, either side restarting — and a stale belief turns Start into a
+                // button that does nothing every other press. `toggle` flips the robot's own
+                // state; turning OFF returns it to the home pose (the prototype's "returning
+                // to default pose"), so turning on always starts the policy from home.
+                let call = proto::Call::RobotEnable(proto::EnableParams {
+                    on: false,
+                    toggle: true,
+                });
+                match request(&mut stream, &mut next_id, &call) {
+                    Err(e) => {
+                        tracing::error!(error = %e, "enable failed");
+                        return std::process::ExitCode::FAILURE;
                     }
-                    mode = if mode == Mode::Head {
-                        Mode::Drive
-                    } else {
-                        Mode::Head
-                    };
-                    tracing::info!(?mode, "mode");
+                    Ok(response) => {
+                        // The robot names the state it ended in; that is the log, since padd
+                        // no longer has a belief of its own to report.
+                        let outcome = response
+                            .and_then(|r| r.result_as::<proto::IntentResult>().ok())
+                            .and_then(|r| r.reason)
+                            .unwrap_or_else(|| "toggled".to_owned());
+                        tracing::warn!(%outcome, "policy");
+                    }
                 }
             }
         }
-        if toggle_body {
-            let leaving = mode == Mode::BodyPose;
-            mode = if leaving { Mode::Drive } else { Mode::BodyPose };
-            tracing::info!(?mode, "mode");
-            if leaving {
-                // The prototype's B-button exit snaps the body back to nominal at once.
-                if let Err(e) = notify(
-                    &mut stream,
-                    &proto::Call::RobotPose(proto::PoseParams {
-                        active: false,
-                        ..Default::default()
-                    }),
-                ) {
+
+        if go_home {
+            // Everything back: the sticks to plain driving, the policy off, and the robot ramped
+            // to its home pose with torque on — from limp, from mid-walk or from a crouch alike.
+            // The disable comes first so the policy cannot pick the robot up again the moment the
+            // ramp ends, which is what `robot.init` alone does on a robot that is driving.
+            tracing::warn!("Start held — home pose, motors stiff, policy off");
+            for call in mode_exit_calls(mode, Mode::Drive) {
+                if let Err(e) = notify(&mut stream, &call) {
                     tracing::error!(error = %e, "send failed");
                     return std::process::ExitCode::FAILURE;
                 }
             }
+            mode = Mode::Drive;
+            imu_reference = None;
+            let disable = proto::Call::RobotEnable(proto::EnableParams {
+                on: false,
+                toggle: false,
+            });
+            for call in [disable, proto::Call::RobotInit] {
+                if let Err(e) = request(&mut stream, &mut next_id, &call) {
+                    tracing::error!(error = %e, "home request failed");
+                    return std::process::ExitCode::FAILURE;
+                }
+            }
+            up = true;
         }
 
-        if toggle_enable && !up {
-            tracing::warn!("Start — robot.init: standing up. Press Start again to drive");
-            match request(&mut stream, &mut next_id, &proto::Call::RobotInit) {
-                Err(e) => {
-                    tracing::error!(error = %e, "init failed");
-                    return std::process::ExitCode::FAILURE;
+        if let Some(next) = wanted_mode {
+            if next != mode {
+                for call in mode_exit_calls(mode, next) {
+                    if let Err(e) = notify(&mut stream, &call) {
+                        tracing::error!(error = %e, "send failed");
+                        return std::process::ExitCode::FAILURE;
+                    }
                 }
-                Ok(_) => up = true,
+                mode = next;
+                tracing::info!(?mode, "mode");
             }
-        } else if toggle_enable {
-            // The robot owns the toggle. A local on/off belief here drifts from the
-            // robot's the moment anything else moves it — robot.relax, the shutdown
-            // sequence, either side restarting — and a stale belief turns Start into a
-            // button that does nothing every other press. `toggle` flips the robot's own
-            // state; turning OFF returns it to the home pose (the prototype's "returning
-            // to default pose"), so turning on always starts the policy from home.
-            let call = proto::Call::RobotEnable(proto::EnableParams {
-                on: false,
-                toggle: true,
-            });
-            match request(&mut stream, &mut next_id, &call) {
-                Err(e) => {
-                    tracing::error!(error = %e, "enable failed");
-                    return std::process::ExitCode::FAILURE;
-                }
-                Ok(response) => {
-                    // The robot names the state it ended in; that is the log, since padd
-                    // no longer has a belief of its own to report.
-                    let outcome = response
-                        .and_then(|r| r.result_as::<proto::IntentResult>().ok())
-                        .and_then(|r| r.reason)
-                        .unwrap_or_else(|| "toggled".to_owned());
-                    tracing::warn!(%outcome, "policy");
+            // Head + move follows the pad's IMU when it can, from wherever the pad is at the
+            // press — and pressing it again re-centres, which is how a person beats the gyro's
+            // yaw drift without a magnetometer.
+            imu_reference = if mode == Mode::HeadDrive {
+                attitude
+            } else {
+                None
+            };
+            if mode == Mode::HeadDrive {
+                if imu_reference.is_some() {
+                    tracing::info!("IMU head control: following the pad from here");
+                } else if imu_head_cfg.enabled && tap.as_ref().is_some_and(|tap| tap.has_imu()) {
+                    // The IMU is there and has not spoken yet — a second after connecting,
+                    // typically. Saying so beats silently doing the other thing.
+                    tracing::warn!(
+                        "the pad's IMU has no attitude yet; the right stick has the head this once"
+                    );
                 }
             }
         }
@@ -722,9 +769,9 @@ fn main() -> std::process::ExitCode {
         // notification, because fifty answered requests a second would spend their time waiting
         // on replies, and the press above already got the real answer.
         //
-        // Whatever X is bound to, not the word "roulade": a skill that does not chain simply
-        // refuses the resend, which costs a notification nobody reads. Only X, because it is the
-        // button the prototype held and the only one anybody holds.
+        // Whatever X is bound to, nothing by default: a skill that does not chain simply refuses
+        // the resend, which costs a notification nobody reads. Only X, because it is the button
+        // the prototype held the roulade on.
         let held = bindings.skill("x").unwrap_or_default();
         if pad.is_pressed(Button::West)
             && !pressed.contains(&"x")
@@ -740,88 +787,37 @@ fn main() -> std::process::ExitCode {
             return std::process::ExitCode::FAILURE;
         }
 
-        // Select: a short press is the emergency stop, on release; held two seconds it is the
-        // shutdown sequence — sit down, torque off, power off — sent once per hold, and the
-        // release after it does nothing. The robot owns the sequence from there.
-        match select.tick(pad.is_pressed(Button::Select), select_released, tick) {
-            SelectAction::Nothing => {}
-            SelectAction::Relax => relax = true,
-            SelectAction::Shutdown => {
+        // Select: nothing on a tap, torque off at two seconds, power off at four. Both are
+        // sent once per hold, and the release after them does nothing. The robot owns the
+        // shutdown sequence from there.
+        match select.tick(
+            pad.is_pressed(Button::Select),
+            select_released,
+            tick,
+            &[RELAX_HOLD, SHUTDOWN_HOLD],
+        ) {
+            HoldAction::Nothing => {}
+            HoldAction::Tap => {
+                tracing::info!("Select tapped — hold it 2 s to cut torque, 4 s to power off")
+            }
+            HoldAction::Reached(0) => {
+                tracing::warn!("Select held — robot.relax: torque off");
+                // Torque off leaves the robot limp, so the next Start stands it up again rather
+                // than toggling the policy on a robot that is lying on the floor.
                 up = false;
-                tracing::warn!("Select held — asking the robot to sit, torque off and power off");
+                if let Err(e) = request(&mut stream, &mut next_id, &proto::Call::RobotRelax) {
+                    tracing::error!(error = %e, "relax request failed");
+                    return std::process::ExitCode::FAILURE;
+                }
+            }
+            HoldAction::Reached(_) => {
+                up = false;
+                tracing::warn!("Select held on — asking the robot to power off");
                 if let Err(e) = request(&mut stream, &mut next_id, &proto::Call::RobotShutdown) {
                     tracing::error!(error = %e, "shutdown request failed");
                     return std::process::ExitCode::FAILURE;
                 }
             }
-        }
-
-        if relax {
-            tracing::warn!("Select released — robot.relax: torque off");
-            // Torque off leaves the robot limp, so the next Start stands it up again rather
-            // than toggling the policy on a robot that is lying on the floor.
-            up = false;
-            if let Err(e) = request(&mut stream, &mut next_id, &proto::Call::RobotRelax) {
-                tracing::error!(error = %e, "relax request failed");
-                return std::process::ExitCode::FAILURE;
-            }
-        }
-
-        if reboot_motors {
-            tracing::warn!(
-                "DPad-Right — asking the robot to reboot its servos (robot.rebootMotors)"
-            );
-            // The reboot leaves the robot limp, so the next Start has to stand it up again
-            // rather than toggle the policy on a robot that is lying down.
-            up = false;
-            let call = proto::Call::RobotRebootMotors(proto::RebootMotorsParams::default());
-            if let Err(e) = request(&mut stream, &mut next_id, &call) {
-                tracing::error!(error = %e, "reboot request failed");
-                return std::process::ExitCode::FAILURE;
-            }
-        }
-
-        // D-pad up held three seconds: switch drive mode, which is what somebody who has just
-        // put wheels on the duck (or taken them off) wants. Sent once per hold, and the target is
-        // named rather than toggled — so a request that crosses a switch from somewhere else asks
-        // for a mode rather than for "the other one", which could be either by the time it lands.
-        if pad.is_pressed(Button::DPadUp) {
-            let held = dpad_up_held_since.get_or_insert(tick);
-            if tick.duration_since(*held) >= MODE_HOLD && !mode_switch_sent {
-                mode_switch_sent = true;
-                let target = if roller { "walk" } else { "roller" };
-                tracing::warn!(
-                    target,
-                    "DPad-Up held — asking the robot to switch drive mode"
-                );
-                let call = proto::Call::RobotSetMode(proto::SetModeParams {
-                    mode: target.to_owned(),
-                });
-                match request(&mut stream, &mut next_id, &call) {
-                    Ok(Some(answer)) => match answer.result_as::<proto::IntentResult>() {
-                        // The stick shaping follows the robot, and only when it agreed: a refused
-                        // switch that changed the mapping here would leave the pad driving a
-                        // walking duck with roller curves.
-                        Ok(result) if result.accepted => {
-                            roller = target == "roller";
-                            tracing::warn!(roller, "drive mode switched");
-                        }
-                        Ok(result) => tracing::warn!(
-                            reason = result.reason.as_deref().unwrap_or("no reason given"),
-                            "the robot refused the mode switch"
-                        ),
-                        Err(e) => tracing::error!(error = %e, "unreadable answer to the switch"),
-                    },
-                    Ok(None) => tracing::warn!("no answer to the mode switch"),
-                    Err(e) => {
-                        tracing::error!(error = %e, "mode switch request failed");
-                        return std::process::ExitCode::FAILURE;
-                    }
-                }
-            }
-        } else {
-            dpad_up_held_since = None;
-            mode_switch_sent = false;
         }
 
         let deadzone = |v: f32| {
@@ -880,35 +876,42 @@ fn main() -> std::process::ExitCode {
             }
         }
 
+        let limits = DriveLimits {
+            roller,
+            max_linear: args.max_linear,
+            max_linear_backward: args.max_linear_backward,
+            max_angular: args.max_angular,
+        };
+
         // This tick's continuous intents, as one frame. Reused rather than built fresh:
         // a `Vec` per tick is an allocation fifty times a second to say what the sticks
         // were doing, which is the shape of thing this loop is meant not to do.
         frame.clear();
         match mode {
-            Mode::Drive if roller => frame.push(proto::Call::RobotMove(proto::MoveParams {
-                // The prototype's roller shaping: push harder than you can brake, no
-                // strafe, heading capped independently of the walking limits.
-                vx: left_y
-                    * if left_y >= 0.0 {
-                        ROLLER_PUSH
-                    } else {
-                        ROLLER_BRAKE
-                    },
-                vy: 0.0,
-                vyaw: -right_x * ROLLER_YAW,
-            })),
-            Mode::Drive => frame.push(proto::Call::RobotMove(proto::MoveParams {
-                vx: left_y
-                    * if left_y >= 0.0 {
-                        args.max_linear
-                    } else {
-                        args.max_linear_backward
-                    },
-                // `vy` is positive to the left; stick-left reads negative on every pad
-                // gilrs normalises.
-                vy: -left_x * args.max_linear,
-                vyaw: -right_x * args.max_angular,
-            })),
+            Mode::Drive => frame.push(proto::Call::RobotMove(limits.walk(left_y, left_x, right_x))),
+            Mode::HeadDrive => match (imu_reference, attitude) {
+                // The pad's tilt has the head, so the sticks keep the whole drive mapping. In the
+                // same frame: the pad's tilt and the sticks describe one instant.
+                (Some(reference), Some(now)) => {
+                    frame.push(proto::Call::RobotMove(limits.walk(left_y, left_x, right_x)));
+                    frame.push(proto::Call::RobotHead(head_from_pad(
+                        pad_imu::relative(reference, now),
+                        imu_head_cfg.gain,
+                        args.max_head,
+                    )));
+                }
+                // Left stick walks and turns — no strafe, the right stick is busy — and the right
+                // stick looks around, with the signs head mode uses for its left stick.
+                _ => {
+                    frame.push(proto::Call::RobotMove(limits.walk(left_y, 0.0, left_x)));
+                    frame.push(proto::Call::RobotHead(proto::HeadParams {
+                        neck_pitch: 0.0,
+                        head_pitch: -right_y * args.max_head,
+                        head_yaw: -right_x * args.max_head,
+                        head_roll: 0.0,
+                    }));
+                }
+            },
             Mode::Head => {
                 // The body must not keep its last velocity while the sticks are posing the
                 // head. The deadman would catch it eventually; a robot that keeps walking
@@ -945,19 +948,6 @@ fn main() -> std::process::ExitCode {
             }
         }
 
-        // IMU head control rides in the same frame as the drive: the pad's tilt and the sticks
-        // describe one instant. Only while driving — body-pose mode owns the whole robot for as
-        // long as it lasts, and stick head mode cannot coexist with this (see the Y handling).
-        if mode == Mode::Drive
-            && let (PadImuHead::Following { reference }, Some(now)) = (imu_head, attitude)
-        {
-            frame.push(proto::Call::RobotHead(head_from_pad(
-                pad_imu::relative(reference, now),
-                imu_head_cfg.gain,
-                args.max_head,
-            )));
-        }
-
         if let Err(e) = continuous.send(&mut stream, &frame, tick) {
             tracing::error!(error = %e, "send failed");
             return std::process::ExitCode::FAILURE;
@@ -967,6 +957,56 @@ fn main() -> std::process::ExitCode {
             std::thread::sleep(remaining);
         }
     }
+}
+
+/// How full deflection maps to velocity, for the modes that walk.
+#[derive(Debug, Clone, Copy)]
+struct DriveLimits {
+    roller: bool,
+    max_linear: f64,
+    max_linear_backward: f64,
+    max_angular: f64,
+}
+
+impl DriveLimits {
+    /// A velocity from three stick axes: forward/back, strafe and turn. Which physical axis is
+    /// which depends on the mode; the shaping does not.
+    fn walk(&self, forward: f64, strafe: f64, turn: f64) -> proto::MoveParams {
+        if self.roller {
+            // The prototype's roller shaping: push harder than you can brake, no strafe,
+            // heading capped independently of the walking limits.
+            return proto::MoveParams {
+                vx: forward
+                    * if forward >= 0.0 {
+                        ROLLER_PUSH
+                    } else {
+                        ROLLER_BRAKE
+                    },
+                vy: 0.0,
+                vyaw: -turn * ROLLER_YAW,
+            };
+        }
+        proto::MoveParams {
+            vx: forward
+                * if forward >= 0.0 {
+                    self.max_linear
+                } else {
+                    self.max_linear_backward
+                },
+            // `vy` is positive to the left; stick-left reads negative on every pad gilrs
+            // normalises.
+            vy: -strafe * self.max_linear,
+            vyaw: -turn * self.max_angular,
+        }
+    }
+}
+
+/// Whether this robot is on wheels, by asking it. `None` for an answer that did not say.
+fn ask_roller(stream: &mut UnixStream, next_id: &mut u64) -> std::io::Result<Option<bool>> {
+    let answer = request(stream, next_id, &proto::Call::RobotMode)?;
+    Ok(answer
+        .and_then(|answer| answer.result_as::<proto::ModeResult>().ok())
+        .map(|mode| mode.mode == "roller"))
 }
 
 /// Send a continuous intent: no `id`, no reply, nothing to wait for.
@@ -1294,35 +1334,17 @@ mod tests {
         );
     }
 
-    /// Y, with an IMU pad: the first press follows from where the pad is, the second holds, the
-    /// third follows again **from where the pad is now** — the new reference is what beats the
-    /// gyro's yaw drift, so a re-entry after a minute of drift starts the head at centre.
+    /// Head + move with an IMU pad re-centres on every press: the reference is the pad's attitude
+    /// at the press, so a re-press after a minute of drift starts the head at centre again.
     #[test]
-    fn y_cycles_follow_hold_follow_and_re_centres_each_time() {
-        let level = [1.0, 0.0, 0.0, 0.0];
-        // Yawed 30° by the time of the third press — drift, or a turn; the pad cannot tell.
+    fn the_pad_attitude_at_the_press_reads_as_centre() {
+        // Yawed 30° by the time of the press — drift, or a turn; the pad cannot tell.
         let yawed = [
             (15.0f32.to_radians()).cos(),
             0.0,
             0.0,
             (15.0f32.to_radians()).sin(),
         ];
-
-        let following = PadImuHead::Off.on_y(level);
-        assert_eq!(following, PadImuHead::Following { reference: level });
-        let holding = following.on_y(yawed);
-        assert_eq!(
-            holding,
-            PadImuHead::Holding,
-            "the second press holds, whatever the pad did"
-        );
-        let again = holding.on_y(yawed);
-        assert_eq!(
-            again,
-            PadImuHead::Following { reference: yawed },
-            "the third follows from the pad's attitude now, not the first one"
-        );
-        // And that reference reads as centre.
         let head = head_from_pad(pad_imu::relative(yawed, yawed), 1.0, 2.5);
         assert!(
             head.head_yaw.abs() < 1e-4 && head.head_pitch.abs() < 1e-4,
@@ -1375,89 +1397,252 @@ mod tests {
         assert!((head.head_yaw - 0.5).abs() < 1e-6, "{head:?}");
     }
 
-    /// Select is read on release. A short press is the stop, on the release; a hold reaching two
-    /// seconds is the shutdown, once, and the release after it is not a stop as well — the robot
-    /// is sitting down and must not be dropped mid-way.
+    const SELECT: [Duration; 2] = [RELAX_HOLD, SHUTDOWN_HOLD];
+    const START: [Duration; 1] = [HOME_HOLD];
+
+    /// Select: a tap does nothing to the robot, two seconds cuts torque, four powers off. Each
+    /// fires once, in order, and the release after either is silent.
     #[test]
-    fn select_stops_on_a_short_release_and_shuts_down_on_a_long_hold() {
+    fn select_cuts_torque_at_two_seconds_and_powers_off_at_four() {
         let t0 = Instant::now();
         let at = |ms: u64| t0 + Duration::from_millis(ms);
-        let mut select = SelectButton::default();
+        let mut select = HoldButton::default();
 
-        // Short press: down for 300 ms, then up.
-        assert_eq!(select.tick(true, false, at(0)), SelectAction::Nothing);
-        assert_eq!(select.tick(true, false, at(300)), SelectAction::Nothing);
-        assert_eq!(select.tick(false, true, at(320)), SelectAction::Relax);
-        assert_eq!(select.tick(false, false, at(340)), SelectAction::Nothing);
+        // A tap: down for 300 ms, then up. Reported, so the log can say what a hold would do.
+        assert_eq!(
+            select.tick(true, false, at(0), &SELECT),
+            HoldAction::Nothing
+        );
+        assert_eq!(
+            select.tick(true, false, at(300), &SELECT),
+            HoldAction::Nothing
+        );
+        assert_eq!(select.tick(false, true, at(320), &SELECT), HoldAction::Tap);
+
+        // Released at 1.9 s: still only a tap — nothing cut torque.
+        assert_eq!(
+            select.tick(true, false, at(1_000), &SELECT),
+            HoldAction::Nothing
+        );
+        assert_eq!(
+            select.tick(true, false, at(2_900), &SELECT),
+            HoldAction::Nothing
+        );
+        assert_eq!(
+            select.tick(false, true, at(2_920), &SELECT),
+            HoldAction::Tap
+        );
+
+        // Held through: torque off at 2 s, power off at 4 s, once each, and a silent release.
+        assert_eq!(
+            select.tick(true, false, at(10_000), &SELECT),
+            HoldAction::Nothing
+        );
+        assert_eq!(
+            select.tick(true, false, at(11_990), &SELECT),
+            HoldAction::Nothing
+        );
+        assert_eq!(
+            select.tick(true, false, at(12_000), &SELECT),
+            HoldAction::Reached(0)
+        );
+        assert_eq!(
+            select.tick(true, false, at(12_020), &SELECT),
+            HoldAction::Nothing
+        );
+        assert_eq!(
+            select.tick(true, false, at(14_000), &SELECT),
+            HoldAction::Reached(1)
+        );
+        assert_eq!(
+            select.tick(true, false, at(14_020), &SELECT),
+            HoldAction::Nothing
+        );
+        assert_eq!(
+            select.tick(false, true, at(15_000), &SELECT),
+            HoldAction::Nothing
+        );
+
+        // Let go between the two: torque is off, the robot stays powered, the release is silent.
+        assert_eq!(
+            select.tick(true, false, at(20_000), &SELECT),
+            HoldAction::Nothing
+        );
+        assert_eq!(
+            select.tick(true, false, at(22_000), &SELECT),
+            HoldAction::Reached(0)
+        );
+        assert_eq!(
+            select.tick(false, true, at(23_000), &SELECT),
+            HoldAction::Nothing
+        );
+    }
+
+    /// Start: a tap is the stand-up / policy toggle, a 1.5 s hold is the way home — and a hold
+    /// is never also a tap, or going home would toggle the policy straight back on.
+    #[test]
+    fn start_taps_toggle_and_a_long_hold_goes_home_only() {
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        let mut start = HoldButton::default();
+
+        assert_eq!(start.tick(true, false, at(0), &START), HoldAction::Nothing);
+        assert_eq!(start.tick(false, true, at(200), &START), HoldAction::Tap);
 
         // Press and release inside one tick: the state never read as down, the edge did.
-        assert_eq!(select.tick(false, true, at(1_000)), SelectAction::Relax);
+        assert_eq!(start.tick(false, true, at(1_000), &START), HoldAction::Tap);
 
-        // Long hold: the shutdown fires at two seconds, once, and the release is silent.
-        assert_eq!(select.tick(true, false, at(2_000)), SelectAction::Nothing);
-        assert_eq!(select.tick(true, false, at(3_990)), SelectAction::Nothing);
-        assert_eq!(select.tick(true, false, at(4_000)), SelectAction::Shutdown);
-        assert_eq!(select.tick(true, false, at(4_020)), SelectAction::Nothing);
-        assert_eq!(select.tick(false, true, at(5_000)), SelectAction::Nothing);
-
-        // And the next short press is a stop again.
-        assert_eq!(select.tick(true, false, at(6_000)), SelectAction::Nothing);
-        assert_eq!(select.tick(false, true, at(6_100)), SelectAction::Relax);
+        assert_eq!(
+            start.tick(true, false, at(2_000), &START),
+            HoldAction::Nothing
+        );
+        assert_eq!(
+            start.tick(true, false, at(3_490), &START),
+            HoldAction::Nothing
+        );
+        assert_eq!(
+            start.tick(true, false, at(3_500), &START),
+            HoldAction::Reached(0)
+        );
+        assert_eq!(
+            start.tick(true, false, at(9_000), &START),
+            HoldAction::Nothing
+        );
+        assert_eq!(
+            start.tick(false, true, at(9_020), &START),
+            HoldAction::Nothing
+        );
     }
 
     /// Select held when the pad drops, back three seconds later with Select still down: that
-    /// is a reconnection, not a two-second hold — the hold was measured against the pad that
-    /// left. Pinned both ways, because the `tick` arithmetic alone would call it a shutdown.
+    /// is a reconnection, not a long hold — the hold was measured against the pad that left.
+    /// Pinned both ways, because the `tick` arithmetic alone would call it a torque cut.
     #[test]
     fn a_hold_does_not_survive_the_pad_going_away() {
         let t0 = Instant::now();
-        let mut select = SelectButton::default();
-        assert_eq!(select.tick(true, false, t0), SelectAction::Nothing);
+        let mut select = HoldButton::default();
+        assert_eq!(select.tick(true, false, t0, &SELECT), HoldAction::Nothing);
 
         select.reset();
         assert_eq!(
-            select.tick(true, false, t0 + SHUTDOWN_HOLD + Duration::from_secs(1)),
-            SelectAction::Nothing,
-            "a hold older than the pad's absence is not a shutdown"
+            select.tick(
+                true,
+                false,
+                t0 + RELAX_HOLD + Duration::from_secs(1),
+                &SELECT
+            ),
+            HoldAction::Nothing,
+            "a hold older than the pad's absence does nothing"
         );
 
-        // Without the reset that same tick is the shutdown — the arithmetic is why the
+        // Without the reset that same tick is the torque cut — the arithmetic is why the
         // reset exists.
-        let mut stale = SelectButton::default();
-        assert_eq!(stale.tick(true, false, t0), SelectAction::Nothing);
+        let mut stale = HoldButton::default();
+        assert_eq!(stale.tick(true, false, t0, &SELECT), HoldAction::Nothing);
         assert_eq!(
-            stale.tick(true, false, t0 + SHUTDOWN_HOLD + Duration::from_secs(1)),
-            SelectAction::Shutdown
+            stale.tick(
+                true,
+                false,
+                t0 + RELAX_HOLD + Duration::from_secs(1),
+                &SELECT
+            ),
+            HoldAction::Reached(0)
         );
     }
 
-    /// The pad dropping after the shutdown does not hand the release back to the stop. The
-    /// robot is already sitting down; a `Relax` here would cut torque mid-motion, which is
-    /// the pairing the two actions are written to keep apart.
+    /// A pad dropping out after the torque cut does not let the rest of that hold power the
+    /// robot off from a fresh start, and its release is not a tap either.
     #[test]
-    fn a_pad_dropout_after_the_shutdown_does_not_revive_the_stop() {
+    fn a_pad_dropout_after_a_threshold_spends_the_rest_of_the_hold() {
         let t0 = Instant::now();
-        let mut select = SelectButton::default();
-        assert_eq!(select.tick(true, false, t0), SelectAction::Nothing);
+        let mut select = HoldButton::default();
+        assert_eq!(select.tick(true, false, t0, &SELECT), HoldAction::Nothing);
         assert_eq!(
-            select.tick(true, false, t0 + SHUTDOWN_HOLD),
-            SelectAction::Shutdown
+            select.tick(true, false, t0 + RELAX_HOLD, &SELECT),
+            HoldAction::Reached(0)
         );
 
-        // Pad gone, pad back, thumb comes off.
+        // Pad gone, pad back with Select still down for longer than the whole sequence.
         select.reset();
+        let back = t0 + RELAX_HOLD + Duration::from_secs(3);
+        assert_eq!(select.tick(true, false, back, &SELECT), HoldAction::Nothing);
         assert_eq!(
-            select.tick(false, true, t0 + SHUTDOWN_HOLD + Duration::from_secs(3)),
-            SelectAction::Nothing,
-            "the release after a shutdown stays silent across a dropout"
+            select.tick(true, false, back + SHUTDOWN_HOLD, &SELECT),
+            HoldAction::Nothing,
+            "the tail of a spent hold powers nothing off"
+        );
+        assert_eq!(
+            select.tick(false, true, back + SHUTDOWN_HOLD, &SELECT),
+            HoldAction::Nothing,
+            "and its release is not a tap"
         );
 
-        // And once that release has been seen, Select is an ordinary stop again.
-        let t1 = t0 + SHUTDOWN_HOLD + Duration::from_secs(4);
-        assert_eq!(select.tick(true, false, t1), SelectAction::Nothing);
+        // Once that release has been seen, Select is an ordinary hold again.
+        let t1 = back + Duration::from_secs(10);
+        assert_eq!(select.tick(true, false, t1, &SELECT), HoldAction::Nothing);
         assert_eq!(
-            select.tick(false, true, t1 + Duration::from_millis(100)),
-            SelectAction::Relax
+            select.tick(true, false, t1 + RELAX_HOLD, &SELECT),
+            HoldAction::Reached(0)
         );
+    }
+
+    /// Leaving a mode puts back what it moved, and only that: body pose releases the body,
+    /// a head mode re-centres the head, and moving between the two head modes keeps the head.
+    #[test]
+    fn leaving_a_mode_puts_back_what_it_moved() {
+        let is_pose_off = |c: &proto::Call| matches!(c, proto::Call::RobotPose(p) if !p.active);
+        let centre = proto::HeadParams::default();
+        let is_head_centre =
+            |c: &proto::Call| matches!(c, proto::Call::RobotHead(h) if *h == centre);
+
+        let calls = mode_exit_calls(Mode::BodyPose, Mode::Drive);
+        assert!(calls.len() == 1 && is_pose_off(&calls[0]), "{calls:?}");
+
+        for head in [Mode::Head, Mode::HeadDrive] {
+            for to in [Mode::Drive, Mode::BodyPose] {
+                let calls = mode_exit_calls(head, to);
+                assert!(
+                    calls.len() == 1 && is_head_centre(&calls[0]),
+                    "{head:?} → {to:?}: {calls:?}"
+                );
+            }
+        }
+
+        assert!(mode_exit_calls(Mode::Head, Mode::HeadDrive).is_empty());
+        assert!(mode_exit_calls(Mode::HeadDrive, Mode::Head).is_empty());
+        assert!(mode_exit_calls(Mode::Drive, Mode::Head).is_empty());
+        assert!(mode_exit_calls(Mode::Drive, Mode::BodyPose).is_empty());
+        assert!(mode_exit_calls(Mode::BodyPose, Mode::BodyPose).is_empty());
+    }
+
+    /// Head + move drives with the left stick alone — forward and turn, no strafe — and on wheels
+    /// it takes the roller shaping like every other walking mode.
+    #[test]
+    fn head_and_move_walks_and_turns_from_the_left_stick() {
+        let walking = DriveLimits {
+            roller: false,
+            max_linear: 0.3,
+            max_linear_backward: 0.2,
+            max_angular: 1.5,
+        };
+        // Left stick up and to the left: forward, turning left.
+        let twist = walking.walk(1.0, 0.0, -1.0);
+        assert_eq!(twist.vx, 0.3);
+        assert_eq!(twist.vy, 0.0);
+        assert_eq!(twist.vyaw, 1.5, "stick left turns left (positive yaw)");
+        assert_eq!(
+            walking.walk(-1.0, 0.0, 0.0).vx,
+            -0.2,
+            "reverse has its own cap"
+        );
+
+        let rolling = DriveLimits {
+            roller: true,
+            ..walking
+        };
+        let twist = rolling.walk(-1.0, 1.0, -1.0);
+        assert_eq!(twist.vx, -ROLLER_BRAKE);
+        assert_eq!(twist.vy, 0.0, "no strafe on wheels");
+        assert_eq!(twist.vyaw, ROLLER_YAW);
     }
 }

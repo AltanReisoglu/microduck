@@ -609,7 +609,7 @@ changes are visible without knowing the defaults, and `error`, for a button boun
 robot no longer has — the realistic way to get one of those is removing a skill, not mistyping.
 
 `""` switches a button off, which is a different wish from `pad reset` putting it back to what the
-robot ships with. Five buttons are bindable: `a`, `x`, `lb`, `rb`, `dpad_down` — and `lb`/`rb` are
+robot ships with. Six buttons are bindable: `a`, `b`, `x`, `y`, `lb`, `rb` — and `lb`/`rb` are
 the **bumpers**, since the analog triggers are the mouth and the quack.
 
 Pairing a pad is a different namespace and a different daemon — `pad.pair` and `pad.forget` are

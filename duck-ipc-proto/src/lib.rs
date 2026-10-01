@@ -4389,7 +4389,7 @@ pub struct SkillsResult {
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PadBindParams {
-    /// `"a"`, `"x"`, `"lb"`, `"rb"` or `"dpad_down"`. A string for the reason a slot is one: a
+    /// `"a"`, `"b"`, `"x"`, `"y"`, `"lb"` or `"rb"`. A string for the reason a slot is one: a
     /// button this build does not have should be refused with the list of ones it does.
     pub button: String,
     /// Three states in one field, the same shape [`LoadPolicyParams`] uses for a path.

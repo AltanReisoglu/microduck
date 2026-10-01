@@ -314,11 +314,12 @@ is refused saying so.
 robotctl pad bindings
 ```
 ```text
-a           ground_pick
-x           roulade
+a           sit_toggle
+b           ground_pick
+x             (nothing)
+y             (nothing)
 lb          kick_left
 rb          kick_right
-dpad_down   sit_toggle
 
 `robotctl pad bind <button> <skill>` changes one; padd picks it up within a second.
 ```
@@ -327,11 +328,12 @@ dpad_down   sit_toggle
 sudo robotctl pad bind x polite-bow
 ```
 ```text
-a           ground_pick
+a           sit_toggle
+b           ground_pick
 x           polite-bow
+y             (nothing)
 lb          kick_left
 rb          kick_right
-dpad_down   sit_toggle
 ```
 
 That writes one line, and only the button you named:
@@ -352,13 +354,13 @@ sudo robotctl pad reset
 A binding naming a skill this robot does not have is marked in the listing rather than
 silently doing nothing when you press it.
 
-Five buttons are bindable: `a`, `x`, `lb`, `rb`, `dpad_down`. **`lb`/`rb` are the bumpers**, not
+Six buttons are bindable: `a`, `b`, `x`, `y`, `lb`, `rb`. **`lb`/`rb` are the bumpers**, not
 the analog triggers, which are the mouth and the quack. An empty name switches a button off, and
-`pad reset <button>` puts one back. The defaults are the mapping the prototype had, so a robot
-with no `[pad]` section behaves exactly as it always has.
+`pad reset <button>` puts one back. X and Y ship empty, so they are the place for a new skill; X
+re-sends while held, which is what a chaining skill like the roulade wants.
 
-The rest of the pad is not bindable: Start toggles the policy, Y and B change what the sticks
-mean, and held Select powers the robot off — the button that stops a robot is the one worth not
+The rest of the pad is not bindable: Start stands the robot up and toggles the policy, the D-pad
+picks what the sticks mean, and held Select cuts torque and powers the robot off — the button that stops a robot is the one worth not
 being able to lose to a config edit. A name is checked against what the robot actually has, so a
 typo is refused with the list rather than becoming a dead button.
 
@@ -500,25 +502,31 @@ Pairing is once per pad and has a page of its own —
 pad without forgetting the first, and what to do when it will not bond (the `Privacy` setting in
 `/etc/bluetooth/main.conf` is the answer more often than anything else).
 
-`padd.service` runs from boot and drives whatever pad connects, so pairing is the only step. The
-mapping is the prototype's, so muscle memory carries over:
+`padd.service` runs from boot and drives whatever pad connects, so pairing is the only step. Each
+part of the pad has one job — face buttons and bumpers run skills, the D-pad picks what the sticks
+mean, and the two small middle buttons are holds, so nothing that cuts torque fires on a brush of
+the thumb:
 
 | control | does |
 | --- | --- |
-| left stick | drive: forward/back and strafe · head: head yaw and pitch · body pose: up and crouch |
-| right stick | drive: turn · head: neck pitch and head roll · body pose: pitch and roll |
-| **Start** | first press: torque on and a 2 s ramp to the home pose, then hold. Second press: the policy drives. After that it toggles the policy |
-| **Y** / triangle | head mode: sticks pose the head (body holds still). With `[pad_imu_head_control] enabled` and a pad that has an IMU: the pad's tilt poses the head and the sticks keep driving — see below |
-| **B** / circle | body-pose mode: sticks lean and crouch the standing robot |
-| **A** / cross | ground pick |
-| **X** / square | roulade — one forward roll; hold to chain rolls |
+| **A** / cross | sit ↔ stand |
+| **B** / circle | ground pick |
+| **X**, **Y** | nothing — free for a skill of your own (`robotctl pad bind`) |
 | **LB / RB** | left / right kick |
-| **DPad-Down** | sit ↔ stand |
 | **RT / LT** | mouth (either trigger) — RT also quacks; LT rides the "wheee" while held |
-| **DPad-Up**, held 3 s | switch drive mode, walk ⇄ roller |
-| **DPad-Right** | reboot every servo: the way back from a tripped overload without pulling the battery. Torque off, then Start |
-| **Select**, short press | torque off (`robot.relax`) **on release**: the emergency stop. The robot drops, so hold it. Then Start stands it up again |
-| **Select**, held 2 s | sit down, torque off, power off — the release afterwards does nothing more |
+| **D-pad left** | move mode: left stick forward/back and strafe, right stick turns. The mode a pad starts in |
+| **D-pad up** | head mode: left stick head yaw and pitch, right stick neck pitch and head roll. The body holds still |
+| **D-pad right** | head + move: left stick forward/back and turn, right stick looks around (head yaw and pitch). With `[pad_imu_head_control] enabled` and a pad that has an IMU, the pad's tilt poses the head instead and the sticks keep the move mapping — see below |
+| **D-pad down** | body pose: left stick up and crouch, right stick pitch and roll |
+| **Start**, press | first press: torque on and a 2 s ramp to the home pose, then hold. Second press: the policy drives. After that it toggles the policy |
+| **Start**, held 1.5 s | home pose, motors stiff, policy off — the "put everything back" button, from anywhere |
+| **Select**, held 2 s | torque off (`robot.relax`). The robot drops, so hold it. Start stands it up again |
+| **Select**, held 4 s | power off, where it lies — torque went at 2 s, so it does not sit first. The release afterwards does nothing more |
+
+The D-pad selects rather than toggles: a press lands in the mode its arrow names, whatever mode
+you were in. Leaving a mode puts back what it moved — the body returns to nominal after body
+pose, the head re-centres after either head mode. A short press of Select does nothing to the
+robot; the journal says how long to hold it.
 
 **Drive the head with the pad itself.** A Pro Controller carries an IMU, and with
 
@@ -526,25 +534,30 @@ mapping is the prototype's, so muscle memory carries over:
 sudo robotctl configure      # Controller-IMU head control → enabled
 ```
 
-Y changes meaning on such a pad: the first press hands the head to the pad — tilt it and the head
-tilts, turn it and the head turns — while the sticks go on driving the body. Press Y again and the
-head holds where it is, sticks still driving. Press it a third time and the pad drives the head again
-**from wherever the pad is now**: its yaw is a gyro's word alone and drifts, and re-centring on every
-re-entry is how you beat the drift without a magnetometer. `gain` in the same section is head
-radians per pad radian, 1 by default. On an Xbox pad, or with the switch off, Y is the stick head
-mode above. `padd` picks the change up within a second; no restart.
+head + move (D-pad right) hands the head to the pad — tilt it and the head tilts, turn it and the
+head turns — while the sticks go on driving the body exactly as in move mode. Press D-pad right
+again and the pad drives the head **from wherever the pad is now**: its yaw is a gyro's word alone
+and drifts, and re-centring on every press is how you beat the drift without a magnetometer.
+`gain` in the same section is head radians per pad radian, 1 by default. On an Xbox pad, or with
+the switch off, the right stick poses the head in that mode. `padd` picks the change up within a
+second; no restart.
 
 There is no stop button: release the sticks and the robot stands, and `robotd`'s deadman stops it
 if `padd` dies. On a roller robot (`mode = "roller"` in `robotd.toml`) the sticks take the roller
-shaping automatically — asymmetric push/brake, no strafe — and A triggers the crouch. The
-other skills ride along: sit, kicks and the roulade work on wheels too, as the prototype has it.
+shaping automatically — asymmetric push/brake, no strafe — and B triggers the crouch. The
+other skills ride along: sit and the kicks work on wheels too, as the prototype has it.
 
-**Holding DPad-Up switches between the two**, for when you have just put wheels on the duck or
-taken them off: the robot quacks once for walking or twice for roller, returns to its home pose,
-loads that mode's policies there and drives again — a few seconds, torque on throughout, no
-restart. `robotd.toml` is not touched, so a reboot comes back in the configured mode; make it
-stick with `robotctl configure` (or `[policy] mode`). It is a hold rather than a press because
-D-pad up is easy to lean on while driving.
+**`robot.setMode` switches between the two**, for when you have just put wheels on the duck or
+taken them off:
+
+```
+duckctl call robot.setMode '{"mode":"roller"}'
+```
+
+The robot quacks once for walking or twice for roller, returns to its home pose, loads that mode's
+policies there and drives again — a few seconds, torque on throughout, no restart, and the pad's
+stick shaping follows within a second. `robotd.toml` is not touched, so a reboot comes back in the
+configured mode; make it stick with `robotctl configure` (or `[policy] mode`).
 
 `pad status` answers two questions separately, because a connected pad and a dead driver look
 identical from the outside:

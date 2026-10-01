@@ -710,7 +710,10 @@ mod tests {
         let m = model("");
         for row in m.rows() {
             assert!(!row.overridden(), "{}", row.entry.key);
-            assert!(!row.effective().is_empty(), "{}", row.entry.key);
+            // X and Y ship with no skill, and an empty binding is a button switched off.
+            if !matches!(row.entry.key, "pad.x" | "pad.y") {
+                assert!(!row.effective().is_empty(), "{}", row.entry.key);
+            }
         }
         // Spot-check values against the daemon's documented defaults.
         let rows = m.rows();
@@ -1010,16 +1013,16 @@ mod tests {
     fn binding_the_default_removes_the_key() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("robotd.toml");
-        std::fs::write(&path, "[pad]\nx = \"polite-bow\"\n").unwrap();
+        std::fs::write(&path, "[pad]\nlb = \"polite-bow\"\n").unwrap();
 
-        super::bind_pad(&path, "x", "roulade").unwrap();
+        super::bind_pad(&path, "lb", "kick_left").unwrap();
         let written = std::fs::read_to_string(&path).unwrap();
         assert!(!written.contains("polite-bow"), "{written}");
         assert!(
-            !written.contains("x ="),
+            !written.contains("lb ="),
             "the default is not pinned: {written}"
         );
-        assert_eq!(super::pad_bindings(&path).unwrap().x, "roulade");
+        assert_eq!(super::pad_bindings(&path).unwrap().lb, "kick_left");
     }
 
     /// **Resetting a button clears it back to the default and leaves the file clean.** The undo
@@ -1055,7 +1058,8 @@ mod tests {
     fn a_missing_config_still_has_bindings() {
         let dir = tempfile::tempdir().unwrap();
         let bindings = super::pad_bindings(&dir.path().join("nothing.toml")).unwrap();
-        assert_eq!(bindings.a, "ground_pick");
+        assert_eq!(bindings.a, "sit_toggle");
+        assert_eq!(bindings.b, "ground_pick");
     }
 
     /// Sections come out in registry order, once each — the editor's headers.

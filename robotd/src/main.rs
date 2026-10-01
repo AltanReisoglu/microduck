@@ -5108,7 +5108,7 @@ mod tests {
     }
 
     /// **`policies.skills` is not the list of names `robot.do` answers to**, and validating
-    /// against it rejects two of the five the pad ships bound to. This is the test that caught
+    /// against it rejects two of the skills the pad ships bound to. This is the test that caught
     /// it: `ground_pick` and `sit_toggle` have their own arm of the cascade rather than being
     /// config entries, so they are absent from `skills` while being perfectly good asks.
     #[test]
@@ -5162,7 +5162,7 @@ mod tests {
         );
     }
 
-    /// A button this build does not have is refused with the five it does, the same shape a bad
+    /// A button this build does not have is refused with the ones it does, the same shape a bad
     /// policy slot is.
     #[test]
     fn binding_an_unknown_button_names_the_real_ones() {
@@ -5177,7 +5177,7 @@ mod tests {
         assert!(!result.accepted);
         let reason = result.reason.unwrap_or_default();
         assert!(
-            reason.contains("triangle") && reason.contains("dpad_down"),
+            reason.contains("triangle") && reason.contains("lb"),
             "{reason}"
         );
     }
@@ -5191,29 +5191,29 @@ mod tests {
 
         let off = bind_pad_request(
             &proto::PadBindParams {
-                button: "x".to_owned(),
+                button: "lb".to_owned(),
                 skill: Some(String::new()),
             },
             &state,
         );
         assert!(off.accepted, "{off:?}");
         assert_eq!(
-            params::edit::pad_bindings(&state.config_path).unwrap().x,
+            params::edit::pad_bindings(&state.config_path).unwrap().lb,
             "",
             "switched off"
         );
 
         let back = bind_pad_request(
             &proto::PadBindParams {
-                button: "x".to_owned(),
+                button: "lb".to_owned(),
                 skill: None,
             },
             &state,
         );
         assert!(back.accepted, "{back:?}");
         assert_eq!(
-            params::edit::pad_bindings(&state.config_path).unwrap().x,
-            "roulade",
+            params::edit::pad_bindings(&state.config_path).unwrap().lb,
+            "kick_left",
             "back to what the robot ships with"
         );
     }
@@ -5225,8 +5225,8 @@ mod tests {
         let (_dir, state) = state_over("");
         let result = bind_pad_request(
             &proto::PadBindParams {
-                button: "x".to_owned(),
-                skill: Some("roulade".to_owned()),
+                button: "lb".to_owned(),
+                skill: Some("kick_left".to_owned()),
             },
             &state,
         );
