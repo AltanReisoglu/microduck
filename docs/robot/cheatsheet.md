@@ -1129,7 +1129,20 @@ and the `--force` variant has conditions worth reading before you use it.
 ### Logs
 
 ```
-journalctl -u configd -b --no-pager | tail -40
+robotctl logs robotd
+```
+
+```
+robotctl logs robotd -n 300 -b -1
+```
+
+`-b -1` is the boot before this one. No `sudo` needed: `configd` reads the journal. It takes
+`robotd`, `btd`, `configd`, `updaterd`, `padd`, `mediad`, `tofd`, `bluetooth` or `NetworkManager`.
+
+To follow or search, use `journalctl`:
+
+```
+sudo journalctl -u configd -b --no-pager | tail -40
 ```
 
 ```
