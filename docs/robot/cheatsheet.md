@@ -487,8 +487,9 @@ journalctl -u robotd -f | grep -E 'picked up|put down|pickup'
 ```
 
 `picked up — pausing the policy` and `put down — handing the robot back to the policy` are the two
-edges, each with the probability that crossed; `robotctl monitor` shows the policy as `picked_up`
-while paused. Only walking and standing are watched — a skill, a sit or a fall is never paused.
+edges, each with the probability that crossed. While paused, `robotctl monitor` shows `PICKED UP`
+where it otherwise says `upright` (the policy reads `held`), and `robot.state` carries
+`safety.picked_up`. Only walking and standing are watched — a skill, a sit or a fall is never paused.
 
 **On by default.** The classifier was trained in simulation only; what would mean it is wrong is a
 pause while the robot is walking normally (the walk freezes for a moment, then resumes), or a robot

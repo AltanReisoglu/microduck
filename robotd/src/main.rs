@@ -3094,8 +3094,10 @@ async fn control_loop<T: RobotIo>(
                 let rest = shutdown_rest.as_ref().expect("just checked it is Some");
                 (rest.target(tick_start), rest.gain, true, "rest".into())
             }
-            // Held: ramp from the policy's last target to the pause pose, at the policy gain —
+            // Picked up: ramp from the policy's last target to the pause pose, at the policy gain —
             // the gain the pose was chosen and evaluated at. `moving` while the ramp travels.
+            // Labelled `held` like any other tick the policy does not drive: being picked up is
+            // a state of the robot, and it goes out as one (`safety.picked_up`).
             _ if pickup_paused => {
                 let watch = pickup_watch
                     .as_ref()
@@ -3104,7 +3106,7 @@ async fn control_loop<T: RobotIo>(
                     watch.target(),
                     policy_cfg.gain,
                     watch.ramping(),
-                    "picked_up".into(),
+                    "held".into(),
                 )
             }
             (true, Some(sensors)) => {
@@ -3352,6 +3354,7 @@ async fn control_loop<T: RobotIo>(
                     limp: matches!(limp_fall, LimpFall::Limp { .. }),
                     gravity: sensors.imu.gravity,
                     gain: safety.gain(),
+                    picked_up: pickup_paused,
                 },
                 control_loop: proto::LoopState {
                     hz: f64::from_bits(state.achieved_hz.load(Ordering::Relaxed)),
