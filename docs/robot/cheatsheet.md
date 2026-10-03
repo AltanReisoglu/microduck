@@ -518,7 +518,7 @@ mapping is the prototype's, so muscle memory carries over:
 | **DPad-Up**, held 3 s | switch drive mode, walk ⇄ roller |
 | **DPad-Right** | reboot every servo: the way back from a tripped overload without pulling the battery. Torque off, then Start |
 | **Select**, short press | torque off (`robot.relax`) **on release**: the emergency stop. The robot drops, so hold it. Then Start stands it up again |
-| **Select**, held 2 s | sit down, torque off, power off — the release afterwards does nothing more |
+| **Select**, held 2 s | sit down, ease into the rest pose, torque off, power off — the release afterwards does nothing more |
 
 **Drive the head with the pad itself.** A Pro Controller carries an IMU, and with
 
