@@ -468,6 +468,32 @@ pub const REGISTRY: &[Entry] = &[
         Kind::Float,
         "Head radians per pad radian — 1 follows the pad exactly, more amplifies the wrist",
     ),
+    // ── [pad_drive] ──────────────────────────────────────────────────────────
+    //
+    // What full stick deflection asks for while walking. Read by `padd`, like `[pad]`. Signed
+    // bounds in the robot's frame: a `_min` is negative.
+    entry("pad_drive.vx_max", Kind::Float, "Full stick forward, m/s"),
+    entry(
+        "pad_drive.vx_min",
+        Kind::Float,
+        "Full stick back, m/s — negative (-0.2 is 0.2 m/s backward)",
+    ),
+    entry(
+        "pad_drive.vy_max",
+        Kind::Float,
+        "Full stick left (strafe), m/s",
+    ),
+    entry(
+        "pad_drive.vy_min",
+        Kind::Float,
+        "Full stick right (strafe), m/s — negative",
+    ),
+    entry("pad_drive.vyaw_max", Kind::Float, "Full turn left, rad/s"),
+    entry(
+        "pad_drive.vyaw_min",
+        Kind::Float,
+        "Full turn right, rad/s — negative",
+    ),
 ];
 
 /// Sections that changed name: `(old, new)`.

@@ -143,8 +143,8 @@ Three properties worth trusting:
 
 Saving offers what the change actually needs, from the daemon that actually reads it: a restart
 for most keys (`[media]` and `[duck_detector]` are `mediad`'s, `[head_imu]` is `tofd`'s), a `robotd`
-*reload* for `[policy]` — the motors stay powered — and nothing at all for `[pad]` and
-`[pad_imu_head_control]`, which `padd` picks up within a second. `sudo`, because the file
+*reload* for `[policy]` — the motors stay powered — and nothing at all for `[pad]`,
+`[pad_imu_head_control]` and `[pad_drive]`, which `padd` picks up within a second. `sudo`, because the file
 is root-owned — without it the editor opens read-only and says so on the first write.
 `--file` points it elsewhere for a bench copy. The shipped `deploy/robotd.toml` stays the
 reference for *why* each knob exists; this is for flipping them.
@@ -554,15 +554,9 @@ pad     Xbox Wireless Controller 78:86:2E:BB:13:28  connected
 padd    active — driving whatever pad connects
 ```
 
-To drive with non-default limits, stop the service first or two processes fight over the sticks:
-
-```
-sudo systemctl stop padd
-```
-
-```
-sudo -u padd /opt/robot/daemon/current/bin/padd --max-linear 0.25
-```
+To drive with non-default speeds, set them in `[pad_drive]` — `vx_max`/`vx_min` forward and back,
+`vy_max`/`vy_min` strafe, `vyaw_max`/`vyaw_min` turning, each `_min` negative — with
+`sudo robotctl configure`. `padd` picks the change up within a second, no restart.
 
 When the link itself is the suspect, watch it live — `robotctl monitor`, then `p`. That works with
 no robot too: on a board whose servos are unpowered or whose `robotd` is stopped, the monitor opens
