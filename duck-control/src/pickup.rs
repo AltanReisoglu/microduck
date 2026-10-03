@@ -27,9 +27,15 @@
 //!
 //! The target and the pause flag are the previous tick's because the training rows pair each
 //! sensor reading with the command that produced it: a row is "what the robot did with what it
-//! was told". Current is in the contract but masked to zero inside the shipped model — in
-//! simulation it separated held from standing far better than it does on a real robot, so the
-//! model was trained not to look at it.
+//! was told". Current is in the contract but the shipped model does not read it — the graph drops
+//! those columns before its first layer. In simulation current separated held from standing far
+//! better than it does on a real robot, so the model was trained without it.
+//!
+//! v2 (2026-10-03): the first model missed a robot lifted by the HEAD and resumed whenever the robot
+//! was turned far from upright (180° about either axis) — the simulated hand had only ever gripped
+//! the trunk and only passed through large tilts. v2 is trained with head grips, sustained holds at
+//! any orientation and quick 180° turns; it is also a third of the size (8k parameters, current
+//! dropped from the graph), because v1 cost ~0.5 ms a tick on the board — 1.4× a policy inference.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;

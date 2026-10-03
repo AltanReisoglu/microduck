@@ -606,12 +606,16 @@ boot. Roller mode is not watched at all: the model has never seen wheels.
 
 The model is trained entirely in simulation, in `microduck_rl` (`pickup/`, `scripts/pickup_*.py`):
 the deployed velstand walks, stands and falls under the training randomisation while a simulated
-hand — a mocap body welded softly to the trunk — lifts, carries, tilts it as far as upside down,
-shakes, sets it down and drops it. The feature layout, the pause pose and the hysteresis timings
+hand — a mocap body welded softly to the trunk or the head — lifts, carries, holds it at any
+orientation including upside down, spins it, shakes it, sets it down and drops it. (The first
+model's hand only gripped the trunk and only passed through large tilts; on the robot it missed a
+duck lifted by the head and resumed when the duck was turned 180°.) The feature layout, the pause pose and the hysteresis timings
 are fixed there, which is why they are constants in `duck_control::pickup` and only the two
 thresholds are params: changing the rest here without retraining is the silent kind of wrong. The
-row carries servo current, but the shipped model masks it out — in simulation it separated held from
-standing far better than it does on a real robot. The file ships in the release
+row carries servo current, but the shipped model drops it before its first layer — in simulation
+it separated held from standing far better than it does on a real robot. On the board the classifier
+costs a few tenths of a millisecond a tick (`cargo run --release -p duck-control --example
+pickup-bench` measures it there, next to a policy inference). The file ships in the release
 (`models/pickup_detector.onnx`), because its input is this loop's own layout and a model from
 another release is the wrong shape in a way no load check sees.
 
