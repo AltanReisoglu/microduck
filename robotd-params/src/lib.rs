@@ -764,8 +764,9 @@ impl Default for ThereminParams {
 /// `[pickup]`: pause the policy while somebody holds the robot, resume when it is put down.
 ///
 /// A classifier over the last second of what the loop already reads (`duck_control::pickup`,
-/// `docs/design/robotd-design.md` §2.4.2). Trained in simulation only, so **off by default**:
-/// turned off, nothing is loaded and nothing runs — the loop is exactly what it was.
+/// `docs/design/robotd-design.md` §2.4.2). **On by default** since the v2 model held up on the
+/// robot in every way it was handled (lifted by the body or the head, turned upside down, spun).
+/// Turned off, nothing is loaded and nothing runs — the loop is exactly what it was.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct PickupParams {
@@ -785,7 +786,7 @@ pub struct PickupParams {
 impl Default for PickupParams {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             model: None,
             pause_threshold: 0.8,
             resume_threshold: 0.35,
@@ -3202,11 +3203,12 @@ mod tests {
         assert_eq!(params.pad_drive.vy_min, -0.1);
     }
 
-    /// Trained in simulation only: a robot nobody configured must not start pausing itself.
+    /// On by default, from the release's own copy of the model — a robot nobody configured stops
+    /// thrashing in the hand. `"none"` is the way to keep the switch on and load nothing.
     #[test]
-    fn pickup_detection_ships_off_and_resolves_the_releases_model() {
+    fn pickup_detection_ships_on_and_resolves_the_releases_model() {
         let pickup = Params::default().pickup;
-        assert!(!pickup.enabled);
+        assert!(pickup.enabled);
         assert_eq!(
             pickup.model_resolved(),
             Some(PathBuf::from(RELEASE_DIR).join("models/pickup_detector.onnx"))

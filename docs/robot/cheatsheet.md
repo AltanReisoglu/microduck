@@ -476,10 +476,11 @@ or `fall_recover` in `robotd.toml` arms the gate: there a fallen robot goes limp
 
 ### Picking the robot up
 
-By default a robot picked up mid-walk keeps walking in your hand until you press Start. With
-`[pickup] enabled = true` (`sudo robotctl configure`, then let it restart `robotd`) it notices
-instead: about 0.2 s after it is lifted the legs settle into a standing stance and stay there,
-however you hold it, and about 0.2 s after it is set down on its feet the policy takes it back.
+A robot picked up mid-walk notices: about 0.2 s after it is lifted the legs settle into a standing
+stance and stay there, however you hold it — by the body or the head, upside down, spun round — and
+about 0.2 s after it is set down on its feet the policy takes it back. `[pickup] enabled = false`
+(`sudo robotctl configure`, then let it restart `robotd`) turns it off, and the legs keep walking in
+your hand until you press Start, as they used to.
 
 ```
 journalctl -u robotd -f | grep -E 'picked up|put down|pickup'
@@ -489,9 +490,9 @@ journalctl -u robotd -f | grep -E 'picked up|put down|pickup'
 edges, each with the probability that crossed; `robotctl monitor` shows the policy as `picked_up`
 while paused. Only walking and standing are watched — a skill, a sit or a fall is never paused.
 
-**Off by default, and new.** The classifier was trained in simulation only, so what to watch for on
-a real robot is a pause while it is walking normally (the walk freezes for a moment, then resumes),
-or a robot that stays paused after being put down. `pause_threshold` and `resume_threshold` in the
+**On by default.** The classifier was trained in simulation only; what would mean it is wrong is a
+pause while the robot is walking normally (the walk freezes for a moment, then resumes), or a robot
+that stays paused after being put down. `pause_threshold` and `resume_threshold` in the
 same section move the two edges; the design is [`robotd-design.md` §2.4.2](../design/robotd-design.md).
 
 ### Gamepad (`configd`)

@@ -313,7 +313,7 @@ mod tests {
             ..Default::default()
         };
         assert!(Watch::build(&no_model).is_none());
-        assert!(!crate::params::PickupParams::default().enabled, "ships off");
+        assert!(crate::params::PickupParams::default().enabled, "ships on");
     }
 
     #[test]

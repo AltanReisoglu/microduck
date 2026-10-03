@@ -320,11 +320,12 @@ mode = "walk"
 # what it commanded); paused, the robot ramps to the walking policy's own standing stance at
 # the policy gain, and the policy takes it back the moment it is on the floor.
 #
-# **Off by default**, and off means nothing loaded and nothing run. The model is trained in
-# simulation only, so it has not yet met a real hand, a real carpet or a real gait: turn it on
-# to try it, and watch for pauses while the robot is walking normally. Only the walking and
-# standing networks are watched — a skill, a sit or a limp-fall is never paused.
-# enabled = false
+# **On by default.** The model is trained in simulation only, and held up on the robot however it
+# was handled — by the body or the head, upside down, spun round. Off means nothing loaded and
+# nothing run. Only the walking and standing networks are watched — a skill, a sit or a
+# limp-fall is never paused. If it ever pauses a robot that is walking normally, this is the
+# switch.
+# enabled = true
 
 # The classifier. Ships in the release (models/pickup_detector.onnx); "none" disables it.
 # model = ".../current/models/pickup_detector.onnx"

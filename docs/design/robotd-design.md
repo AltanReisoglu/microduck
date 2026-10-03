@@ -581,7 +581,7 @@ deliberately on the late side.
 
 A policy has no idea its feet have left the floor. Picked up mid-walk, it keeps stepping, and the
 legs thrash in the hand until somebody presses Start — which is also the only way to get a robot
-that will hold still to be carried. `[pickup]` (off by default) notices instead: a small classifier,
+that will hold still to be carried. `[pickup]` (on by default) notices instead: a small classifier,
 `duck_control::pickup`, reads the last second of what the loop already reads — gyro, projected
 gravity, joint positions and velocities, the target it commanded the tick before — and scores how
 likely it is that a hand is carrying the robot. Over 0.8 for 100 ms pauses the policy; under 0.35

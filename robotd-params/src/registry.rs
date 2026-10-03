@@ -345,7 +345,7 @@ pub const REGISTRY: &[Entry] = &[
     feature(
         "pickup.enabled",
         Kind::Bool,
-        "Pause the policy while the robot is held, resume when put down — off by default",
+        "Pause the policy while the robot is held, resume when put down",
     ),
     entry(
         "pickup.model",
