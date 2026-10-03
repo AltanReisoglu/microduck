@@ -22,6 +22,7 @@ mod chorale;
 mod control;
 mod intents;
 mod params;
+mod pickup;
 mod soc;
 mod sound;
 mod theremin;
@@ -1950,6 +1951,11 @@ async fn control_loop<T: RobotIo>(
         None
     };
 
+    // Pick-up detection (`[pickup]`). Off by default, and then this is `None` and nothing in
+    // the loop below loads, scores or pauses anything. A model that will not load is a
+    // warning, not unhealthy: the classifier is a convenience, and the robot walks without it.
+    let mut pickup_watch = pickup::Watch::build(&params.pickup);
+
     // The theremin. `[theremin] enabled` is off by default, so on most ducks this is `None`
     // and nothing here subscribes to depth at all — `tofd` keeps its own counsel, and
     // `robotctl monitor` is unaffected either way, since it subscribes to `tofd` itself.
@@ -2641,6 +2647,50 @@ async fn control_loop<T: RobotIo>(
         }
         let in_limp_fall = limp_fall != LimpFall::Idle;
 
+        // Pick-up detection (`[pickup]`): pause the walking/standing networks while somebody
+        // holds the robot, hand it back when it is on the floor. Watches only while those two
+        // networks have the robot — everything that owns it outright (a skill, a sit, the
+        // limp-fall, a disable, the shutdown sit) ends a pause and resets the watch. Roller mode
+        // is not watched: the model has never seen wheels.
+        let pickup_paused = match pickup_watch.as_mut() {
+            Some(watch) => {
+                let watching = policy_cfg.mode == Mode::Walk
+                    && snapshot.enabled
+                    && bringup == Bringup::Ready
+                    && !in_limp_fall
+                    && safety.imu_ready()
+                    && shutdown_sit.is_none()
+                    && !powered_off
+                    && controller
+                        .as_ref()
+                        .is_some_and(|c| !c.busy() && !c.is_sitting());
+                let p_held = watch.p_held().map(|p| format!("{p:.2}"));
+                match watch.tick(watching, fresh.as_ref(), period) {
+                    Some(pickup::Edge::Pause) => {
+                        tracing::warn!(
+                            p_held = watch.p_held().map(|p| format!("{p:.2}")),
+                            "picked up — pausing the policy"
+                        )
+                    }
+                    Some(pickup::Edge::Resume) if watching => {
+                        tracing::warn!(
+                            p_held = watch.p_held().map(|p| format!("{p:.2}")),
+                            "put down — handing the robot back to the policy"
+                        )
+                    }
+                    Some(pickup::Edge::Resume) => {
+                        tracing::warn!(
+                            p_held,
+                            "pickup pause released: something else has the robot"
+                        )
+                    }
+                    None => {}
+                }
+                watch.paused()
+            }
+            None => false,
+        };
+
         // Smooth the command. The limp-fall sequence holds the twist at zero outright, so
         // the robot is not handed back mid-command; and leaving body-pose mode snaps the
         // body back to nominal rather than gliding, which is its B-button exit.
@@ -2896,6 +2946,8 @@ async fn control_loop<T: RobotIo>(
             // The limp-fall sequence owns the robot for its duration: the whole point is
             // that the policy is *not* driving while the robot falls, lands and is posed.
             && !in_limp_fall
+            // Held in somebody's hand: the robot holds the pause pose until it is put down.
+            && !pickup_paused
             && sensors.is_some()
             && imu_warm
             && !powered_off;
@@ -2983,6 +3035,19 @@ async fn control_loop<T: RobotIo>(
                 ),
                 LimpFall::Idle => unreachable!("in_limp_fall excludes Idle"),
             },
+            // Held: ramp from the policy's last target to the pause pose, at the policy gain —
+            // the gain the pose was chosen and evaluated at. `moving` while the ramp travels.
+            _ if pickup_paused => {
+                let watch = pickup_watch
+                    .as_ref()
+                    .expect("pickup_paused implies a watch");
+                (
+                    watch.target(),
+                    policy_cfg.gain,
+                    watch.ramping(),
+                    "picked_up".into(),
+                )
+            }
             (true, Some(sensors)) => {
                 let controller = controller.as_mut().expect("driving implies a controller");
                 match controller.step(sensors, &command, snapshot.pose.active, dt, scale_mult) {
@@ -3192,6 +3257,11 @@ async fn control_loop<T: RobotIo>(
         if driving && theremin_state.is_none() && chorale_state.is_none() {
             targets[duck_control::model::MOUTH_INDEX] =
                 duck_control::model::mouth_target(snapshot.mouth);
+        }
+
+        // The next feature row pairs its reading with this command.
+        if let Some(watch) = pickup_watch.as_mut() {
+            watch.commanded(&targets);
         }
 
         match safety.apply(targets, hold, gain) {
