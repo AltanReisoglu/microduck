@@ -105,6 +105,16 @@ behave, and those numbers stay radians whatever the screen is set to. The joint 
 robotctl monitor --json --hz 50 > run.jsonl
 ```
 
+**Is it sitting or standing?** `robotctl posture` prints, live, the signals a detector would
+decide on: the trunk's height above the feet (joint angles through the kinematic model, along
+gravity from the IMU, and as a percentage of the model's standing height), trunk pitch and roll,
+and how far the legs are from the home pose. It works with torque off. It decides nothing yet —
+record one file per pose and compare:
+
+```
+robotctl posture --json --label seated > seated.jsonl
+```
+
 ### Configuring the robot
 
 ```
