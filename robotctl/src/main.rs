@@ -48,7 +48,6 @@ mod frame;
 mod imu_view;
 mod monitor;
 mod path_map;
-mod posture;
 mod show;
 
 /// Exit codes. Stable — CI asserts on these.
@@ -150,26 +149,6 @@ enum Namespace {
     Robot {
         #[command(subcommand)]
         command: RobotCommand,
-    },
-
-    /// Show, live, the numbers a seated-or-standing detector would decide on.
-    ///
-    /// Trunk height above the feet (joint angles through the kinematic model, along gravity
-    /// from the IMU), trunk pitch and roll, and leg deviation from the home pose — all from
-    /// `robot.state`, so it works with torque off. A measuring tool: it decides nothing.
-    ///
-    /// To collect readings for choosing thresholds, record one file per pose:
-    /// `robotctl posture --json --label seated > seated.jsonl`.
-    Posture {
-        /// Readings per second.
-        #[arg(long, default_value_t = 5, value_parser = clap::value_parser!(u32).range(1..=50))]
-        hz: u32,
-        /// One JSON object per reading instead of a live line.
-        #[arg(long)]
-        json: bool,
-        /// A tag copied into every JSON reading — the pose the robot is in while recording.
-        #[arg(long)]
-        label: Option<String>,
     },
 
     /// Play this robot's quack. The loudest way to tell ducks apart: every robot's voice
@@ -606,68 +585,6 @@ fn run_quack(socket: &Path) -> Result<(), Failure> {
     }
     println!("🦆");
     Ok(())
-}
-
-/// `robotctl posture` — see [`posture`].
-fn run_posture(socket: &Path, hz: u32, json: bool, label: Option<&str>) -> Result<(), Failure> {
-    let mut stream = Client::connect_to("robotd", socket)?;
-    stream.hello()?;
-    stream.send(&proto::Request::call(
-        proto::Id::Number(1),
-        &proto::Call::RobotSubscribe(proto::SubscribeParams { hz: Some(hz) }),
-    ))?;
-
-    let standing = posture::standing_height_m();
-    if !json {
-        println!("standing trunk height in the model: {standing:.3} m — Ctrl-C to stop");
-    }
-    let mut line = String::new();
-    loop {
-        line.clear();
-        match stream.reader.read_line(&mut line) {
-            Err(e) => {
-                return Err(Failure::new(
-                    exit::UNREACHABLE,
-                    format!("the state stream stopped: {e}"),
-                ));
-            }
-            Ok(0) => return Ok(()),
-            Ok(_) => {}
-        }
-        let Some(state) = serde_json::from_str::<proto::Request>(&line)
-            .ok()
-            .and_then(|r| r.as_state())
-        else {
-            continue;
-        };
-        let reading = posture::measure(&state.joints, state.imu.as_ref().map(|imu| imu.quat));
-        if json {
-            let mut value = serde_json::to_value(reading).unwrap_or_default();
-            value["t"] = state.t.into();
-            value["policy"] = state.policy.clone().into();
-            if let Some(label) = label {
-                value["label"] = label.into();
-            }
-            println!("{value}");
-            continue;
-        }
-        let degrees =
-            |v: Option<f64>| v.map_or_else(|| "   — ".to_owned(), |v| format!("{v:+5.1}°"));
-        let height = reading.trunk_height_m.map_or_else(
-            || "  —  ".to_owned(),
-            |h| format!("{h:.3} m ({:>3.0}%)", 100.0 * h / standing),
-        );
-        print!(
-            "\r  height {height}  level {:.3} m  pitch {}  roll {}  legs {:.2} rad  sagittal {:.2} rad  [{}]   ",
-            reading.trunk_height_level_m,
-            degrees(reading.pitch_deg),
-            degrees(reading.roll_deg),
-            reading.leg_deviation_rad,
-            reading.sagittal_deviation_rad,
-            state.policy,
-        );
-        let _ = std::io::stdout().flush();
-    }
 }
 
 /// Set by the `SIGINT` handler so the theremin is put down on the way out rather than left
@@ -5164,9 +5081,6 @@ fn run(cli: Cli) -> Result<(), Failure> {
         }
         Namespace::Quack => {
             return run_quack(&cli.robot_socket);
-        }
-        Namespace::Posture { hz, json, label } => {
-            return run_posture(&cli.robot_socket, hz, json, label.as_deref());
         }
         Namespace::Theremin { off } => {
             return run_theremin(&cli.robot_socket, off);

@@ -537,34 +537,6 @@ pub const JOINT_NAMES: [&str; 15] = [
     "right_ankle",
 ];
 
-/// Home pose. The trunk sits ~5 mm further forward than the v1.5 pose so the CoM is over
-/// the ankle axis; the old pose biased the robot backwards.
-///
-/// Must match `HOME_FRAME` in the training env — a policy is trained against these angles
-/// and observes joint positions *relative* to them, so a discrepancy here is a constant
-/// offset on 14 observation slots.
-///
-/// Here rather than in `duck_control::model` for the reason [`JOINT_NAMES`] is: a client
-/// reading [`RobotState::joints`] to judge a pose needs the reference it is relative to, and
-/// `duck-control` re-exports this so there is one table.
-pub const DEFAULT_POSITION: [f64; JOINT_NAMES.len()] = [
-    0.0,     // left_hip_yaw
-    -0.0873, // left_hip_roll
-    -0.4579, // left_hip_pitch
-    -0.0049, // left_knee
-    0.4530,  // left_ankle
-    0.3491,  // neck_pitch
-    0.3491,  // head_pitch
-    0.0,     // head_yaw
-    0.0,     // head_roll
-    0.0,     // mouth
-    0.0,     // right_hip_yaw
-    0.0873,  // right_hip_roll
-    0.4579,  // right_hip_pitch
-    0.0049,  // right_knee
-    -0.4530, // right_ankle
-];
-
 /// Method names, as they go on the wire. Namespaced so a new namespace cannot collide
 /// with `update.*`. [`Call`] is the typed form.
 pub mod method {
