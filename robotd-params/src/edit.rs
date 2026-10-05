@@ -1065,6 +1065,7 @@ mod tests {
         assert_eq!(
             s,
             vec![
+                "board",
                 "bus",
                 "control",
                 "update_gate",

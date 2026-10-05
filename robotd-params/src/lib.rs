@@ -16,6 +16,7 @@
 //! test that walks [`Params`]'s own serialization, so a new section cannot be added without
 //! the registry (and therefore the editor) learning about it.
 
+pub mod board;
 pub mod edit;
 pub mod registry;
 
@@ -63,6 +64,8 @@ pub const DEFAULT_PATH: &str = "/etc/robot/robotd.toml";
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct Params {
+    /// Which electronic board this robot is built on. [`board`] says who reads it.
+    pub board: board::BoardParams,
     pub bus: Bus,
     pub control: Control,
     pub update_gate: UpdateGate,

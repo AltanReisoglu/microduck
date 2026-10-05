@@ -98,6 +98,9 @@ fn apply_for(key: &str) -> Option<Apply> {
     let (section, name) = key.split_once('.')?;
     Some(match section {
         "media" | "duck_detector" => Apply::Restart("mediad"),
+        // `updaterd` reads the board before every check, for the hardware revision a release is
+        // checked against (`robotd_params::board::Board::declared`). Nothing else reads it yet.
+        "board" => Apply::Live("updaterd"),
         // `padd` stats the file once a second and re-reads both of its sections when the mtime
         // moves — `padd/src/main.rs`, where the reload is a line above `tap.imu_control()` and
         // says why it is on every tick. So there is nothing to offer, and offering a restart

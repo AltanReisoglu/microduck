@@ -100,6 +100,12 @@ const fn feature(key: &'static str, kind: Kind, doc: &'static str) -> Entry {
 
 /// Every key, grouped by section, sections in the shipped file's order.
 pub const REGISTRY: &[Entry] = &[
+    // ── [board] ──────────────────────────────────────────────────────────────
+    entry(
+        "board.version",
+        Kind::Choice(crate::board::BOARD_LABELS),
+        "Which electronic board this robot is built on — set when it is provisioned",
+    ),
     // ── [bus] ────────────────────────────────────────────────────────────────
     entry("bus.port", Kind::Text, "Dynamixel serial port device"),
     // Not a feature switch, though it is a `Bool`: the front page is "what does this robot

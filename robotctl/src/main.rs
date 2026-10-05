@@ -39,6 +39,7 @@ use std::time::{Duration, Instant};
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use duck_ipc_proto as proto;
 use robotd_params::Slot;
+use robotd_params::board::Board;
 
 mod camera;
 mod cells;
@@ -1675,9 +1676,54 @@ struct HealthReport {
     /// software block already reports.
     #[serde(skip_serializing_if = "Option::is_none")]
     account: Option<proto::AccountStatusResult>,
+    board: BoardReport,
     /// This machine's clock when `remote` was read, so rendering stays pure.
     #[serde(skip)]
     read_at: i64,
+}
+
+/// Which board this robot is declared to be, and what its device tree says.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+struct BoardReport {
+    /// `[board] version` in `robotd.toml` — what everything that differs between boards reads.
+    declared: Board,
+    /// What `/proc/device-tree/compatible` names, or `None` when it names nothing we know.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detected: Option<Board>,
+}
+
+impl BoardReport {
+    fn read() -> Self {
+        Self {
+            declared: Board::declared(Path::new(robotd_params::DEFAULT_PATH)).unwrap_or_default(),
+            detected: Board::detected(),
+        }
+    }
+
+    /// What is worth saying about the board: a declaration the hardware contradicts, and a board
+    /// whose updates are about to end.
+    ///
+    /// The declaration is not corrected, only questioned: it is what provisioning wrote, and the
+    /// device tree is a hint — which is why nothing else reads it.
+    fn warnings(&self) -> Vec<String> {
+        let mut warnings = Vec::new();
+        if let Some(detected) = self.detected.filter(|&d| d != self.declared) {
+            warnings.push(format!(
+                "robotd.toml declares a {declared} board, and the device tree looks like a \
+                 {detected}. The board decides which releases this robot can install. If the \
+                 device tree is right:\n  sudo robotctl configure  (board.version = \"{detected}\")",
+                declared = self.declared,
+            ));
+        }
+        if let Some(last) = self.declared.last_release() {
+            warnings.push(format!(
+                "updates for the {} board end with release {last}: later releases will not \
+                 install on this robot.",
+                self.declared
+            ));
+        }
+        warnings
+    }
 }
 
 impl HealthReport {
@@ -1724,6 +1770,7 @@ fn run_health(
             .ok()
             .and_then(|mut client| client.call(&proto::Call::AccountStatus).ok())
             .and_then(|response| response.result_as::<proto::AccountStatusResult>().ok()),
+        board: BoardReport::read(),
         read_at: unix_now(),
     };
     // Here rather than in `collect_version_report`, which `robotctl version` shares: `version`
@@ -1732,6 +1779,8 @@ fn run_health(
     let quiet = quiet_source_warnings(&report.software.components);
     report.software.warnings.extend(quiet);
     report.software.warnings.extend(not_checked);
+    let board = report.board.warnings();
+    report.software.warnings.extend(board);
 
     match Client::connect_to("robotd", robot_socket) {
         Err(failure) => report.robot_error = Some(failure.message),
@@ -1907,6 +1956,8 @@ fn render_health(report: &HealthReport) -> String {
             let _ = writeln!(out, "robot     unavailable");
         }
     }
+
+    let _ = writeln!(out, "board     {}", report.board.declared);
 
     // Between the robot verdict and the software block, because it is a fact about the hardware
     // rather than about which release is installed. Omitted entirely when `mediad` has published
@@ -6283,8 +6334,44 @@ mod tests {
             camera: None,
             remote: None,
             account: None,
+            board: BoardReport {
+                declared: Board::Zero3,
+                detected: Some(Board::Zero3),
+            },
             read_at: 1_000_000,
         }
+    }
+
+    #[test]
+    fn health_names_the_declared_board() {
+        let out = render_health(&health_report(None, Some("no robotd")));
+        assert!(out.contains("board     zero3"), "{out}");
+    }
+
+    /// A board agreeing with its device tree, or one whose device tree names nothing we know, is
+    /// not worth a line. One the device tree contradicts is, with the command that fixes it.
+    #[test]
+    fn health_questions_a_board_the_device_tree_contradicts() {
+        let board = |declared, detected| BoardReport { declared, detected };
+        assert!(
+            board(Board::Zero3, Some(Board::Zero3))
+                .warnings()
+                .is_empty()
+        );
+        assert!(board(Board::Beta, None).warnings().is_empty());
+
+        let warnings = board(Board::Zero3, Some(Board::Beta)).warnings();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0].contains("declares a zero3 board"),
+            "{}",
+            warnings[0]
+        );
+        assert!(
+            warnings[0].contains("board.version = \"beta\""),
+            "{}",
+            warnings[0]
+        );
     }
 
     /// `updaterd` saying the robot is signed in as `name`, or signed in to nothing.
