@@ -480,10 +480,11 @@ robot holds it too. A relax or a servo reboot forgets the seat and every move wi
 next bring-up starts from a standing robot's state, as after a boot.
 
 **The robot is looked at twice** (`robotd/src/posture.rs`). When torque comes on, a robot that
-reads seated is held stiff where it is instead of being ramped straight-legged to the standing
-home pose, which pulls it out of the seat and over backwards. And once per enable, before the
-policy takes over, because the ramp is open-loop: a robot that started folded can end it
-standing, sat back on its seat or on its back; a seat already known rises without measuring. The verdict comes from the trunk's height above the feet — the
+reads seated ramps to the seat — the sitstand policy's own trained SIT keyframe — instead of
+straight-legged to the standing home pose, which pulls it out of the seat and over backwards.
+And once per enable, before the policy takes over, because the ramp is open-loop: a robot that
+started folded can end it standing, sat back on its seat or on its back. That second look is
+taken even over a seat the controller already believes in. The verdict comes from the trunk's height above the feet — the
 feet sites through the kinematic model, turned into the world by the IMU — and the trunk's tilt.
 Seated, the sitstand network rises first; standing, lying down (tilt past 45°) or in between,
 the gait takes over as it always has. The check picks how the policy starts, never whether: a

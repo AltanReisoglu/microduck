@@ -480,6 +480,15 @@ impl Controller {
         self.sit_settle = 0.0;
     }
 
+    /// The robot is not in a seat after all — measured standing as the policy took over: forget
+    /// the one this controller believed in, so the gait rather than the sitstand network drives.
+    pub fn leave_seat(&mut self) {
+        if self.sit == Sit::Sitting {
+            self.sit = Sit::Up;
+        }
+        self.sit_settle = 0.0;
+    }
+
     /// The robot was found sitting as the policy took over: rise through the sitstand network,
     /// which then hands over to the gait, instead of giving the gait a seated robot.
     pub fn begin_rise_from_seat(&mut self) {

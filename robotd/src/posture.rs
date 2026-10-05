@@ -146,6 +146,14 @@ mod tests {
         assert!(reading.height_ratio > 0.9, "{reading:?}");
     }
 
+    /// The seat the ramp brings a sitting robot to, level, reads seated — or the second Start
+    /// would hand a robot it had just sat down to the gait.
+    #[test]
+    fn the_seat_pose_is_seated() {
+        let reading = classify(&crate::SEAT_POSITION, [1.0, 0.0, 0.0, 0.0]);
+        assert_eq!(reading.posture, Posture::Seated, "{reading:?}");
+    }
+
     /// **Three ways of sitting, one verdict.** The joint angles of these have little in common —
     /// hips folded, knees folded, both — and the old mean-deviation criterion would have scored
     /// them anywhere from 0.4 to 0.9 rad. The trunk's height above the feet puts all three low.
