@@ -472,6 +472,14 @@ impl Controller {
         self.sit = Sit::Sitting;
     }
 
+    /// The robot was found sitting as torque came on: it is held where it is, and this is the seat
+    /// it is in. Already settled — it did not just sit down, so standing up is not refused as
+    /// "still sitting down".
+    pub fn enter_seat(&mut self) {
+        self.sit = Sit::Sitting;
+        self.sit_settle = 0.0;
+    }
+
     /// The robot was found sitting as the policy took over: rise through the sitstand network,
     /// which then hands over to the gait, instead of giving the gait a seated robot.
     pub fn begin_rise_from_seat(&mut self) {
@@ -904,6 +912,18 @@ mod tests {
         // The held button is still the held button: a chaining skill refreshes itself.
         assert_eq!(c.start_skill(1), Ok(true));
         assert_eq!(c.start_skill(1), Ok(false), "a hold, not a second move");
+    }
+
+    /// A seat found at torque-on is already settled: it refuses moves like any seat, and stands
+    /// up at once rather than as "still sitting down".
+    #[test]
+    #[ignore = "requires ONNX Runtime >= 1.23"]
+    fn a_seat_found_at_torque_on_is_settled() {
+        let mut c = full_controller();
+        c.enter_seat();
+        assert!(c.is_sitting());
+        assert!(c.start_ground_pick().is_err(), "no pick from it");
+        assert_eq!(c.sit_toggle(), Ok("stand"), "no settle to wait out");
     }
 
     /// A deliberate stop keeps the seat and drops the move in flight; a reset forgets both.

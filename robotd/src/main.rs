@@ -2078,11 +2078,16 @@ async fn control_loop<T: RobotIo>(
                 // anything else can be tested.
                 (Bringup::Limp, Some(sensors)) => match safety.set_torque(true) {
                     Ok(()) => {
-                        tracing::warn!(?HOME_RAMP, "robot.init: torque on, ramping to home");
-                        bringup = Bringup::Homing {
-                            from: sensors.positions,
-                            since: tick_start,
-                        };
+                        if into_seat(sensors, safety.imu_ready(), controller.as_mut()) {
+                            hold = sensors.positions;
+                            bringup = Bringup::Ready;
+                        } else {
+                            tracing::warn!(?HOME_RAMP, "robot.init: torque on, ramping to home");
+                            bringup = Bringup::Homing {
+                                from: sensors.positions,
+                                since: tick_start,
+                            };
+                        }
                     }
                     Err(e) => tracing::warn!(error = %e, "cannot enable torque"),
                 },
@@ -2702,14 +2707,19 @@ async fn control_loop<T: RobotIo>(
         {
             match safety.set_torque(true) {
                 Ok(()) => {
-                    tracing::warn!(
-                        ?HOME_RAMP,
-                        "enabling the policy: torque on, ramping to home"
-                    );
-                    bringup = Bringup::Homing {
-                        from: sensors.positions,
-                        since: tick_start,
-                    };
+                    if into_seat(sensors, safety.imu_ready(), controller.as_mut()) {
+                        hold = sensors.positions;
+                        bringup = Bringup::Ready;
+                    } else {
+                        tracing::warn!(
+                            ?HOME_RAMP,
+                            "enabling the policy: torque on, ramping to home"
+                        );
+                        bringup = Bringup::Homing {
+                            from: sensors.positions,
+                            since: tick_start,
+                        };
+                    }
                 }
                 // Reported, not fatal, and it stays `Limp` so the next tick tries again: a bus that
                 // dropped one transaction is ordinary, and a robot that refused to ever come up
@@ -2880,8 +2890,8 @@ async fn control_loop<T: RobotIo>(
         // it always has: this only picks how the policy starts, never whether — a Start is the
         // person deciding the robot should drive. The verdict is logged either way.
         //
-        // Skipped for a robot whose seat is already known (stopped while sitting): the sitstand
-        // network holds that seat and A stands it up.
+        // A robot whose seat is already known — held stiff in it since the first Start, or stopped
+        // while sitting — is not measured again: it rises.
         if !snapshot.enabled {
             posture_checked = false;
         }
@@ -2895,7 +2905,10 @@ async fn control_loop<T: RobotIo>(
             && let (Some(controller), Some(sensors)) = (controller.as_mut(), sensors.as_ref())
         {
             posture_checked = true;
-            if !controller.is_sitting() && !controller.busy() {
+            if controller.is_sitting() {
+                tracing::warn!("posture: seated (known) — rising via the sitstand policy");
+                controller.begin_rise_from_seat();
+            } else if !controller.busy() {
                 let reading = posture::classify(&sensors.positions, sensors.imu.quat);
                 let height = format!("{:.0}%", 100.0 * reading.height_ratio);
                 let tilt = format!("{:.0}°", reading.tilt_deg);
@@ -4083,6 +4096,37 @@ fn remove_skill_request(
             proto::IntentResult::accepted()
         }
     }
+}
+
+/// Torque has just come on: is the robot sitting, so that it should be held stiff in its seat
+/// rather than ramped to the standing home pose?
+///
+/// Ramping a seated robot to the home pose drags it straight-legged out of the seat and over
+/// backwards; holding it where it is keeps it seated, and the next Start rises it with the
+/// sitstand network. Only on a clear seated verdict, with a converged IMU and a network to rise
+/// with — anything less ramps to home as before. Marks the seat on the controller when it holds.
+fn into_seat(
+    sensors: &duck_control::Sensors,
+    imu_ready: bool,
+    controller: Option<&mut Controller>,
+) -> bool {
+    let Some(controller) = controller.filter(|c| c.has_sitstand()) else {
+        return false;
+    };
+    if !imu_ready {
+        tracing::warn!("posture: the IMU has not converged — ramping to home without a check");
+        return false;
+    }
+    let reading = posture::classify(&sensors.positions, sensors.imu.quat);
+    let height = format!("{:.0}%", 100.0 * reading.height_ratio);
+    let tilt = format!("{:.0}°", reading.tilt_deg);
+    if reading.posture != posture::Posture::Seated {
+        tracing::info!(%height, %tilt, posture = ?reading.posture, "posture at torque on: ramping to home");
+        return false;
+    }
+    tracing::warn!(%height, %tilt, "posture: seated — torque on, holding the seat. Start again rises");
+    controller.enter_seat();
+    true
 }
 
 /// What each bindable pad button runs, with the two things a client cannot work out alone.
