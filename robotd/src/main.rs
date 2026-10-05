@@ -2919,6 +2919,11 @@ async fn control_loop<T: RobotIo>(
                         tracing::warn!(%height, %tilt, "posture: {why} — not starting the policy");
                         intents.set_enabled(false);
                         posture_refused = true;
+                        // Heard, not only logged: whoever pressed Start is looking at the robot,
+                        // not at the journal, and a press that does nothing reads as a dead pad.
+                        if let Some(voice) = voice.as_mut() {
+                            voice.play("alarm", false);
+                        }
                     }
                 }
             }
@@ -4700,7 +4705,9 @@ fn dispatch(
                     accepted: true,
                     reason: Some(
                         if on {
-                            "enabled — driving"
+                            // Not "driving": the loop looks at the robot's posture before the
+                            // policy takes it, and may undo this — see `posture`.
+                            "enabled — the policy starts once the posture check passes"
                         } else {
                             "disabled — returning to the home pose"
                         }
