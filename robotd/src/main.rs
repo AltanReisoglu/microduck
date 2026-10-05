@@ -2876,16 +2876,15 @@ async fn control_loop<T: RobotIo>(
         // stop it: the policy keeps going and the humans stay in charge.
         // Before the policy takes a robot over, look at it: the ramp to home is open-loop, and a
         // robot that started folded can end it standing, sat back on its seat or on its back.
-        // Standing, the gait takes over. Seated, the sitstand network stands it up first. Lying,
-        // or neither clearly up nor down, nothing drives — the enable is undone and the journal
-        // says why, so the next Start looks again.
+        // Seated, the sitstand network stands it up first. Anything else, the gait takes over as
+        // it always has: this only picks how the policy starts, never whether — a Start is the
+        // person deciding the robot should drive. The verdict is logged either way.
         //
         // Skipped for a robot whose seat is already known (stopped while sitting): the sitstand
         // network holds that seat and A stands it up.
         if !snapshot.enabled {
             posture_checked = false;
         }
-        let mut posture_refused = false;
         if snapshot.enabled
             && !posture_checked
             && !was_driving
@@ -2901,36 +2900,28 @@ async fn control_loop<T: RobotIo>(
                 let height = format!("{:.0}%", 100.0 * reading.height_ratio);
                 let tilt = format!("{:.0}°", reading.tilt_deg);
                 match reading.posture {
-                    posture::Posture::Standing => {
-                        tracing::warn!(%height, %tilt, "posture: standing — the policy takes over")
-                    }
                     posture::Posture::Seated if controller.has_sitstand() => {
                         tracing::warn!(%height, %tilt, "posture: seated — rising via the sitstand policy");
                         controller.begin_rise_from_seat();
                     }
                     verdict => {
-                        let why = match verdict {
-                            posture::Posture::Lying => "the robot is lying down",
+                        let what = match verdict {
+                            posture::Posture::Standing => "standing",
+                            posture::Posture::Lying => "lying down",
                             posture::Posture::Seated => {
-                                "the robot is seated and has no sitstand policy to rise with"
+                                "seated, with no sitstand policy to rise with"
                             }
-                            _ => "the robot is neither clearly standing nor clearly seated",
+                            posture::Posture::Unsure => {
+                                "neither clearly standing nor clearly seated"
+                            }
                         };
-                        tracing::warn!(%height, %tilt, "posture: {why} — not starting the policy");
-                        intents.set_enabled(false);
-                        posture_refused = true;
-                        // Heard, not only logged: whoever pressed Start is looking at the robot,
-                        // not at the journal, and a press that does nothing reads as a dead pad.
-                        if let Some(voice) = voice.as_mut() {
-                            voice.play("alarm", false);
-                        }
+                        tracing::warn!(%height, %tilt, "posture: {what} — the policy takes over");
                     }
                 }
             }
         }
 
         let driving = snapshot.enabled
-            && !posture_refused
             && bringup == Bringup::Ready
             && controller.is_some()
             // The limp-fall sequence owns the robot for its duration: the whole point is
@@ -4705,9 +4696,7 @@ fn dispatch(
                     accepted: true,
                     reason: Some(
                         if on {
-                            // Not "driving": the loop looks at the robot's posture before the
-                            // policy takes it, and may undo this — see `posture`.
-                            "enabled — the policy starts once the posture check passes"
+                            "enabled — driving"
                         } else {
                             "disabled — returning to the home pose"
                         }

@@ -483,8 +483,9 @@ next bring-up starts from a standing robot's state, as after a boot.
 enable: the ramp to home is open-loop, and a robot that started folded can end it standing, sat
 back on its seat or on its back. The verdict comes from the trunk's height above the feet — the
 feet sites through the kinematic model, turned into the world by the IMU — and the trunk's tilt.
-Standing, the gait takes over; seated, the sitstand network rises first; lying down (tilt past
-45°) or between sitting and standing height, the enable is undone and the journal says why. The
+Seated, the sitstand network rises first; standing, lying down (tilt past 45°) or in between,
+the gait takes over as it always has. The check picks how the policy starts, never whether: a
+Start is the person deciding the robot should drive. The
 height is the signal because the joint angles are not: three recorded seats with little in common
 joint by joint all read 15–39 % of standing height.
 

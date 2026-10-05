@@ -1,9 +1,10 @@
 //! Is the robot standing, sitting, or lying down — judged from where it actually is.
 //!
 //! Asked once each time the policy is about to take over a robot at its home pose: the ramp there
-//! is open-loop, and a robot that started folded can end it standing, or sat back on its seat, or
-//! on its back. Each wants something different from the next Start, and guessing wrong is a fall:
-//! a gait handed a seated robot walks it over backwards, and a rise handed a standing one throws it.
+//! is open-loop, and a robot that started folded can end it standing or sat back on its seat. The
+//! two want different starts — a gait handed a seated robot walks it over backwards, and a rise
+//! handed a standing one throws it — so a seated verdict starts with the sitstand rise. Every other
+//! verdict starts the gait: this picks how the policy starts, never whether.
 //!
 //! Two signals, both available on a stiff robot standing still:
 //!
@@ -17,7 +18,8 @@
 //!   nothing — a robot lying down has its feet level with its trunk whatever its legs do.
 //!
 //! Between the two height thresholds the verdict is [`Posture::Unsure`], on purpose: the robot is
-//! neither clearly up nor clearly down, and the caller does nothing rather than guess.
+//! neither clearly up nor clearly down, so it is not handed to the rise, which is only safe from
+//! a real seat.
 
 use duck_ipc_proto as proto;
 use kinematics::Quat;
