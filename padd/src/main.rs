@@ -34,7 +34,8 @@
 //! D-pad right     head + move — left stick walks and turns, right stick looks around
 //! D-pad left      move — the sticks walk, strafe and turn
 //! D-pad down      body + head — left stick crouches and leans sideways, right stick looks around
-//! Start           first press stands up, then toggles the policy
+//! Start           first press stands up, then starts the policy
+//! Start, 1 s      stops the policy — the robot returns to its home pose, stiff
 //! Start, 1.5 s    home pose, motors stiff, policy off — a seated robot stays seated
 //! Select, 2 s     torque off and reboot every servo
 //! Select, 4 s     power off, where it lies
@@ -196,9 +197,13 @@ struct Args {
 /// switches a pad on and is not a background load.
 const IDLE_POLL: Duration = Duration::from_millis(500);
 
+/// Start held this long stops the policy. A hold rather than a tap, so the button that starts the
+/// robot cannot also stop it mid-stride on a press that bounced or was meant as a start.
+const STOP_HOLD: Duration = Duration::from_secs(1);
+
 /// Start held this long brings the robot to its home pose with the motors stiff and the policy
-/// off: the "put everything back" button. Long enough that a press meant for the policy toggle
-/// never reaches it, short enough to be the obvious thing to do when the robot is somewhere odd.
+/// off: the "put everything back" button. Past [`STOP_HOLD`], so the policy is already off by the
+/// time it fires; short enough to be the obvious thing to do when the robot is somewhere odd.
 const HOME_HOLD: Duration = Duration::from_millis(1500);
 
 /// Select held this long cuts torque and reboots every servo — the robot drops, so hold it.
@@ -468,8 +473,8 @@ fn main() -> std::process::ExitCode {
         hz = args.hz,
         roller,
         "driving — A sit, B ground pick, LB/RB kicks, triggers mouth; D-pad up head, \
-         right head + move, left move, down body + head; Start stands up then toggles the policy, \
-         Start (1.5s) home pose; Select (2s) torque off + servo reboot, Select (4s) power off"
+         right head + move, left move, down body + head; Start stands up then starts the policy, \
+         Start (1s) stop, Start (1.5s) home pose; Select (2s) torque off + servo reboot, Select (4s) power off"
     );
 
     let period = Duration::from_secs_f64(1.0 / args.hz as f64);
@@ -636,15 +641,30 @@ fn main() -> std::process::ExitCode {
             imu_reference = None;
         }
 
-        // Start: a tap stands the robot up, then toggles the policy; held, it is the way home.
+        // Start: a tap stands the robot up, then starts the policy; held a second it stops it,
+        // and held on to a second and a half it is the way home.
         let mut go_home = false;
         match start.tick(
             pad.is_pressed(Button::Start),
             start_released,
             tick,
-            &[HOME_HOLD],
+            &[STOP_HOLD, HOME_HOLD],
         ) {
             HoldAction::Nothing => {}
+            HoldAction::Reached(0) => {
+                // Named rather than toggled: a hold means "stop", whatever the robot was doing.
+                let call = proto::Call::RobotEnable(proto::EnableParams {
+                    on: false,
+                    toggle: false,
+                });
+                match request(&mut stream, &mut next_id, &call) {
+                    Err(e) => {
+                        tracing::error!(error = %e, "enable failed");
+                        return std::process::ExitCode::FAILURE;
+                    }
+                    Ok(_) => tracing::warn!("Start held — policy off"),
+                }
+            }
             HoldAction::Reached(_) => go_home = true,
             HoldAction::Tap if !up => {
                 tracing::warn!("Start — robot.init: standing up. Press Start again to drive");
@@ -657,15 +677,12 @@ fn main() -> std::process::ExitCode {
                 }
             }
             HoldAction::Tap => {
-                // The robot owns the toggle. A local on/off belief here drifts from the
-                // robot's the moment anything else moves it — robot.relax, the shutdown
-                // sequence, either side restarting — and a stale belief turns Start into a
-                // button that does nothing every other press. `toggle` flips the robot's own
-                // state; turning OFF returns it to the home pose (the prototype's "returning
-                // to default pose"), so turning on always starts the policy from home.
+                // A tap only ever starts: stopping is the one-second hold. Named rather than
+                // toggled for the same reason — a tap on a robot already driving must not stop
+                // it — and an enable the robot already has is a no-op on its side.
                 let call = proto::Call::RobotEnable(proto::EnableParams {
-                    on: false,
-                    toggle: true,
+                    on: true,
+                    toggle: false,
                 });
                 match request(&mut stream, &mut next_id, &call) {
                     Err(e) => {
@@ -678,7 +695,7 @@ fn main() -> std::process::ExitCode {
                         let outcome = response
                             .and_then(|r| r.result_as::<proto::IntentResult>().ok())
                             .and_then(|r| r.reason)
-                            .unwrap_or_else(|| "toggled".to_owned());
+                            .unwrap_or_else(|| "enabled".to_owned());
                         tracing::warn!(%outcome, "policy");
                     }
                 }
@@ -1416,7 +1433,7 @@ mod tests {
     }
 
     const SELECT: [Duration; 2] = [RELAX_HOLD, SHUTDOWN_HOLD];
-    const START: [Duration; 1] = [HOME_HOLD];
+    const START: [Duration; 2] = [STOP_HOLD, HOME_HOLD];
 
     /// Select: a tap does nothing to the robot, two seconds cuts torque, four powers off. Each
     /// fires once, in order, and the release after either is silent.
@@ -1496,10 +1513,10 @@ mod tests {
         );
     }
 
-    /// Start: a tap is the stand-up / policy toggle, a 1.5 s hold is the way home — and a hold
-    /// is never also a tap, or going home would toggle the policy straight back on.
+    /// Start: a tap is the stand-up / start, a 1 s hold stops, and holding on to 1.5 s goes home
+    /// as well — and a hold is never also a tap, or stopping would start the policy straight back.
     #[test]
-    fn start_taps_toggle_and_a_long_hold_goes_home_only() {
+    fn start_taps_start_holds_stop_then_go_home() {
         let t0 = Instant::now();
         let at = |ms: u64| t0 + Duration::from_millis(ms);
         let mut start = HoldButton::default();
@@ -1510,17 +1527,47 @@ mod tests {
         // Press and release inside one tick: the state never read as down, the edge did.
         assert_eq!(start.tick(false, true, at(1_000), &START), HoldAction::Tap);
 
+        // Let go at 0.9 s: still a tap, so nothing stopped.
         assert_eq!(
             start.tick(true, false, at(2_000), &START),
             HoldAction::Nothing
         );
         assert_eq!(
-            start.tick(true, false, at(3_490), &START),
+            start.tick(true, false, at(2_900), &START),
+            HoldAction::Nothing
+        );
+        assert_eq!(start.tick(false, true, at(2_920), &START), HoldAction::Tap);
+
+        // Held 1 s: stop, and the release is silent.
+        assert_eq!(
+            start.tick(true, false, at(4_000), &START),
             HoldAction::Nothing
         );
         assert_eq!(
-            start.tick(true, false, at(3_500), &START),
+            start.tick(true, false, at(5_000), &START),
             HoldAction::Reached(0)
+        );
+        assert_eq!(
+            start.tick(false, true, at(5_200), &START),
+            HoldAction::Nothing
+        );
+
+        // Held on: stop at 1 s, home at 1.5 s, once each.
+        assert_eq!(
+            start.tick(true, false, at(6_000), &START),
+            HoldAction::Nothing
+        );
+        assert_eq!(
+            start.tick(true, false, at(7_000), &START),
+            HoldAction::Reached(0)
+        );
+        assert_eq!(
+            start.tick(true, false, at(7_490), &START),
+            HoldAction::Nothing
+        );
+        assert_eq!(
+            start.tick(true, false, at(7_500), &START),
+            HoldAction::Reached(1)
         );
         assert_eq!(
             start.tick(true, false, at(9_000), &START),

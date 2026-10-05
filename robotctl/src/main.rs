@@ -837,9 +837,9 @@ enum PadCommand {
     /// What each of the pad's one-shot buttons runs.
     ///
     /// Six are bindable: `a`, `b`, `x`, `y`, `lb`, `rb`. The rest are not skills — Start stands
-    /// the robot up and toggles the policy, the D-pad changes what the sticks mean, held Select
-    /// cuts torque and powers the robot off — and the button that stops a robot is the one worth
-    /// not being able to lose.
+    /// the robot up and starts and stops the policy, the D-pad changes what the sticks mean,
+    /// held Select cuts torque and powers the robot off — and the button that stops a robot is
+    /// the one worth not being able to lose.
     Bindings {
         #[arg(long)]
         json: bool,
