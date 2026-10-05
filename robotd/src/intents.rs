@@ -75,8 +75,7 @@ impl Default for PoseIntent {
 pub struct SkillRequests {
     /// Phase-scripted, and still its own thing until the descriptor grows a command generator.
     pub ground_pick: bool,
-    /// Latched, and driven internally by the shutdown sit and the seated-boot rise as well as
-    /// by a button, which is why it is not one of the configurable one-shots either.
+    /// Latched, and driven internally by the shutdown sit as well as by a button, which is why it is not one of the configurable one-shots either.
     pub sit_toggle: bool,
     /// The configurable one-shots, as a mask over the resolved skill list.
     ///

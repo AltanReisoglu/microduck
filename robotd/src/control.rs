@@ -472,14 +472,6 @@ impl Controller {
         self.sit = Sit::Sitting;
     }
 
-    /// Seated boot: the robot powered on already sitting, so rise via the sitstand network
-    /// instead of dragging the legs through a linear ramp to the standing pose.
-    pub fn begin_boot_rise(&mut self) {
-        self.sit = Sit::Rising {
-            remaining: self.skills.sitstand_rise_s,
-        };
-    }
-
     /// One tick.
     ///
     /// `body_active` says a client is holding the body-pose mode: the twist is zeroed and

@@ -143,10 +143,6 @@ const COAST_TICKS: u32 = 3;
 /// the very jolt it exists to prevent.
 const RESET_AFTER_PAUSE: Duration = Duration::from_millis(200);
 
-/// Mean leg-joint deviation from the home pose above which a boot counts as seated —
-/// hips and knees folded far from standing. The prototype's threshold.
-const SEATED_BOOT_RAD: f64 = 0.30;
-
 /// Where the limp-fall sequence is (`[safety] limp_fall`).
 ///
 /// The daemon's only answer to a fall, and it runs *during* one rather than after it: the
@@ -1803,23 +1799,11 @@ async fn control_loop<T: RobotIo>(
         return;
     };
 
-    // Was the robot powered on already sitting? A seated duck has hips and knees folded
-    // far from the standing pose. If so, the first bring-up rises via the sitstand network
-    // instead of dragging the legs through the linear ramp — the ramp is for a robot that
-    // is roughly standing.
-    const LEG_JOINTS: [usize; 10] = [0, 1, 2, 3, 4, 10, 11, 12, 13, 14];
-    let leg_deviation = LEG_JOINTS
-        .iter()
-        .map(|&j| (hold[j] - DEFAULT_POSITION[j]).abs())
-        .sum::<f64>()
-        / LEG_JOINTS.len() as f64;
-    let mut seated_boot = leg_deviation > SEATED_BOOT_RAD;
-    if seated_boot {
-        tracing::warn!(
-            deviation = format!("{leg_deviation:.2}"),
-            "seated boot detected — will stand up via the sitstand policy"
-        );
-    }
+    // A robot powered on sitting comes up the same way as one whose torque was cut: the first
+    // Start ramps it slowly to the home pose and holds, the second hands it to the policy. It
+    // used to rise through the sitstand network instead, which made the first Start a torque-on
+    // in the seat and the second a rise straight into walking — two buttons that did something
+    // different from every other bring-up.
 
     // Loaded once here and again on a mode switch — see `build_controller`.
     let mut controller = build_controller(&policy_cfg, params.safety.limp_fall, &state);
@@ -2090,23 +2074,11 @@ async fn control_loop<T: RobotIo>(
                 // anything else can be tested.
                 (Bringup::Limp, Some(sensors)) => match safety.set_torque(true) {
                     Ok(()) => {
-                        if seated_boot && controller.as_ref().is_some_and(|c| c.has_sitstand()) {
-                            seated_boot = false;
-                            tracing::warn!(
-                                "robot.init: seated boot — rising via the sitstand policy"
-                            );
-                            controller
-                                .as_mut()
-                                .expect("checked above")
-                                .begin_boot_rise();
-                            bringup = Bringup::Ready;
-                        } else {
-                            tracing::warn!(?HOME_RAMP, "robot.init: torque on, ramping to home");
-                            bringup = Bringup::Homing {
-                                from: sensors.positions,
-                                since: tick_start,
-                            };
-                        }
+                        tracing::warn!(?HOME_RAMP, "robot.init: torque on, ramping to home");
+                        bringup = Bringup::Homing {
+                            from: sensors.positions,
+                            since: tick_start,
+                        };
                     }
                     Err(e) => tracing::warn!(error = %e, "cannot enable torque"),
                 },
@@ -2726,26 +2698,14 @@ async fn control_loop<T: RobotIo>(
         {
             match safety.set_torque(true) {
                 Ok(()) => {
-                    if seated_boot && controller.as_ref().is_some_and(|c| c.has_sitstand()) {
-                        // Seated boot: hold the seat and rise via the sitstand network —
-                        // the linear ramp would drag folded legs sideways through the floor.
-                        seated_boot = false;
-                        tracing::warn!("seated boot — rising via the sitstand policy");
-                        controller
-                            .as_mut()
-                            .expect("checked above")
-                            .begin_boot_rise();
-                        bringup = Bringup::Ready;
-                    } else {
-                        tracing::warn!(
-                            ?HOME_RAMP,
-                            "enabling the policy: torque on, ramping to home"
-                        );
-                        bringup = Bringup::Homing {
-                            from: sensors.positions,
-                            since: tick_start,
-                        };
-                    }
+                    tracing::warn!(
+                        ?HOME_RAMP,
+                        "enabling the policy: torque on, ramping to home"
+                    );
+                    bringup = Bringup::Homing {
+                        from: sensors.positions,
+                        since: tick_start,
+                    };
                 }
                 // Reported, not fatal, and it stays `Limp` so the next tick tries again: a bus that
                 // dropped one transaction is ordinary, and a robot that refused to ever come up
@@ -4277,7 +4237,7 @@ fn load_policy_request(
 ///
 /// The two that are not in the configurable list keep their names: `ground_pick` writes a
 /// scripted phase rather than a constant, and `sit_toggle` is latched and is driven internally
-/// by the shutdown sit and the seated-boot rise as well as by a button. Everything else is an
+/// by the shutdown sit as well as by a button. Everything else is an
 /// index into what config says this robot can do.
 ///
 /// One load of the published names for the whole decision: they are the *current* mode's, and

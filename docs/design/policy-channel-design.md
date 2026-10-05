@@ -570,8 +570,8 @@ globally when it was squatting in the walk slot.
 ### 10.2 What stays in the daemon
 
 `walk` and `stand` are the fallback pair, chosen by command magnitude, and there is nothing below
-them to hand back to. `sitstand` is latched and driven internally by the shutdown sit and the
-seated-boot rise, not only by a button — `scripted`, in the manifest's word. `ground_pick`
+them to hand back to. `sitstand` is latched and driven internally by the shutdown sit, not only
+by a button — `scripted`, in the manifest's word. `ground_pick`
 writes a phase rather than a constant. None of the four is a generic one-shot, and a set entry
 may not answer to `ground_pick` or `sit_toggle` — a second network behind either name would be
 fed an all-zero command it never trained on. The guard is on the encoding as well as the name: a

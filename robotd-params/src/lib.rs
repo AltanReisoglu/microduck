@@ -852,8 +852,8 @@ pub struct PolicyParams {
     pub walk: Option<PathBuf>,
     /// Standing policy. Without one the walking policy runs at every velocity.
     pub stand: Option<PathBuf>,
-    /// Commanded sit↔stand (posture flag in the twist `vx` slot). Sit toggle, shutdown sit
-    /// and the seated-boot rise all need it.
+    /// Commanded sit↔stand (posture flag in the twist `vx` slot). Sit toggle and the shutdown
+    /// sit both need it.
     pub sitstand: Option<PathBuf>,
     /// Phase-scripted ground pick. In roller mode this slot holds the crouch.
     pub ground_pick: Option<PathBuf>,
@@ -920,8 +920,7 @@ pub fn is_none_sentinel(path: &std::path::Path) -> bool {
 /// is a fifth set of the same four numbers, and could not be added without a daemon release.
 ///
 /// Deliberately *only* the zero-command family. `walk` and `stand` are the fallback pair chosen
-/// by command magnitude, `sitstand` is latched and driven internally by the shutdown sit and the
-/// seated-boot rise, and `ground_pick` writes a scripted phase rather than a constant. Those stay
+/// by command magnitude, `sitstand` is latched and driven internally by the shutdown sit, and `ground_pick` writes a scripted phase rather than a constant. Those stay
 /// where they are until something needs them not to; see `docs/ideas/policy-moves.md`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
