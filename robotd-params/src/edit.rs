@@ -649,6 +649,19 @@ pub fn bind_pad(path: &Path, button: &str, skill: &str) -> Result<(), String> {
     model.save()
 }
 
+/// Declare the board, written out even when it is the default.
+///
+/// Unlike every other edit, which clears a key set to its default: `zero3` is the default *and* a
+/// declaration, and a robot whose file says it is one that was asked, where an absent key is one
+/// that never was. Same document, same validation and same save as the rest.
+pub fn set_board(path: &Path, board: crate::board::Board) -> Result<(), String> {
+    let mut model = Model::load(path)?;
+    model
+        .pending
+        .insert("board.version", Edit::Set(board.label().into()));
+    model.save()
+}
+
 /// Record which file a policy slot runs — or clear the key, which is what a reset is.
 ///
 /// **The daemon's half of `robot.loadPolicy`.** A slot is `[policy] <slot>` in the config file
@@ -1056,6 +1069,26 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let bindings = super::pad_bindings(&dir.path().join("nothing.toml")).unwrap();
         assert_eq!(bindings.a, "ground_pick");
+    }
+
+    /// The shipped file, its `[board]` commented out, gains a real key — the default included,
+    /// which an ordinary edit would have cleared — and keeps its comments.
+    #[test]
+    fn declaring_the_board_writes_even_the_default() {
+        use crate::board::Board;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("robotd.toml");
+        std::fs::write(&path, SHIPPED).unwrap();
+        assert_eq!(Board::declared(&path), None);
+
+        set_board(&path, Board::Zero3).unwrap();
+        assert_eq!(Board::declared(&path), Some(Board::Zero3));
+        set_board(&path, Board::Beta).unwrap();
+        assert_eq!(Board::declared(&path), Some(Board::Beta));
+
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(written.contains("# Which electronic board"), "{written}");
+        assert_eq!(written.matches("[board]").count(), 1, "{written}");
     }
 
     /// Sections come out in registry order, once each — the editor's headers.
