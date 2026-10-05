@@ -472,6 +472,14 @@ impl Controller {
         self.sit = Sit::Sitting;
     }
 
+    /// The robot was found sitting as the policy took over: rise through the sitstand network,
+    /// which then hands over to the gait, instead of giving the gait a seated robot.
+    pub fn begin_rise_from_seat(&mut self) {
+        self.sit = Sit::Rising {
+            remaining: self.skills.sitstand_rise_s,
+        };
+    }
+
     /// One tick.
     ///
     /// `body_active` says a client is holding the body-pose mode: the twist is zeroed and

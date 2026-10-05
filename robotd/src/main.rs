@@ -22,6 +22,7 @@ mod chorale;
 mod control;
 mod intents;
 mod params;
+mod posture;
 mod soc;
 mod sound;
 mod theremin;
@@ -1841,6 +1842,9 @@ async fn control_loop<T: RobotIo>(
     let mut bus_drops_quiet = 0u32;
     let mut bus_drops_window = 0u32;
     let mut was_driving = false;
+    // Whether this enable has had its posture check — see `posture`. Once per enable, so a bus
+    // hiccup that pauses the driving for a few ticks does not re-judge a robot mid-stride.
+    let mut posture_checked = false;
     let mut bringup = Bringup::Limp;
     // A mode switch in flight: the mode to end up in, once the robot is home. `None` the rest of
     // the time, which is nearly always.
@@ -2870,7 +2874,58 @@ async fn control_loop<T: RobotIo>(
         // And only once the ramp is done, or the policy's first step would come from wherever the
         // robot was slumped. A fall does not stop the driving, as the prototype does not
         // stop it: the policy keeps going and the humans stay in charge.
+        // Before the policy takes a robot over, look at it: the ramp to home is open-loop, and a
+        // robot that started folded can end it standing, sat back on its seat or on its back.
+        // Standing, the gait takes over. Seated, the sitstand network stands it up first. Lying,
+        // or neither clearly up nor down, nothing drives — the enable is undone and the journal
+        // says why, so the next Start looks again.
+        //
+        // Skipped for a robot whose seat is already known (stopped while sitting): the sitstand
+        // network holds that seat and A stands it up.
+        if !snapshot.enabled {
+            posture_checked = false;
+        }
+        let mut posture_refused = false;
+        if snapshot.enabled
+            && !posture_checked
+            && !was_driving
+            && bringup == Bringup::Ready
+            && !in_limp_fall
+            && imu_warm
+            && !powered_off
+            && let (Some(controller), Some(sensors)) = (controller.as_mut(), sensors.as_ref())
+        {
+            posture_checked = true;
+            if !controller.is_sitting() && !controller.busy() {
+                let reading = posture::classify(&sensors.positions, sensors.imu.quat);
+                let height = format!("{:.0}%", 100.0 * reading.height_ratio);
+                let tilt = format!("{:.0}°", reading.tilt_deg);
+                match reading.posture {
+                    posture::Posture::Standing => {
+                        tracing::warn!(%height, %tilt, "posture: standing — the policy takes over")
+                    }
+                    posture::Posture::Seated if controller.has_sitstand() => {
+                        tracing::warn!(%height, %tilt, "posture: seated — rising via the sitstand policy");
+                        controller.begin_rise_from_seat();
+                    }
+                    verdict => {
+                        let why = match verdict {
+                            posture::Posture::Lying => "the robot is lying down",
+                            posture::Posture::Seated => {
+                                "the robot is seated and has no sitstand policy to rise with"
+                            }
+                            _ => "the robot is neither clearly standing nor clearly seated",
+                        };
+                        tracing::warn!(%height, %tilt, "posture: {why} — not starting the policy");
+                        intents.set_enabled(false);
+                        posture_refused = true;
+                    }
+                }
+            }
+        }
+
         let driving = snapshot.enabled
+            && !posture_refused
             && bringup == Bringup::Ready
             && controller.is_some()
             // The limp-fall sequence owns the robot for its duration: the whole point is

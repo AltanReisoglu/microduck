@@ -518,7 +518,7 @@ the thumb:
 | **D-pad up** | head mode: left stick head yaw and pitch, right stick neck pitch and head roll. The body holds still |
 | **D-pad right** | head + move: left stick forward/back and turn, right stick looks around (head yaw and pitch). With `[pad_imu_head_control] enabled` and a pad that has an IMU, the pad's tilt poses the head instead and the sticks keep the move mapping — see below |
 | **D-pad down** | body + head: left stick up/down rises and crouches, left/right leans the body sideways; right stick looks around (head yaw and pitch). The body does not walk |
-| **Start**, press | first press: torque on and a 2 s ramp to the home pose, then hold. Second press: the policy drives. After that it toggles the policy |
+| **Start**, press | first press: torque on and a 2 s ramp to the home pose, then hold. Second press: the robot checks how it ended up — standing, the policy drives; sat back on its seat, it rises with the sitstand policy first; lying down or in between, nothing starts and the journal says why. After that it toggles the policy |
 | **Start**, held 1.5 s | home pose, motors stiff, policy off — the "put everything back" button, from anywhere. Sitting, it stays seated, stiff: A stands it up after the next Start |
 | **Select**, held 2 s | torque off and every servo rebooted (`robot.rebootMotors`) — also the way back from a tripped overload without pulling the battery. The robot drops, so hold it. Start stands it up again |
 | **Select**, held 4 s | power off, where it lies — torque went at 2 s, so it does not sit first. The release afterwards does nothing more |
