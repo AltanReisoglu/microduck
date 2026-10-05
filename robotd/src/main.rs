@@ -1353,6 +1353,9 @@ const STARTUP_READ_LOG_EVERY: u32 = 30;
 /// `Limp`, writes nothing new, and leaves a standing robot standing. Only an explicit
 /// `robot.enable` moves it on, which is a human pressing Start.
 #[derive(Debug, Clone, Copy, PartialEq)]
+// One of these exists, on the loop's stack: boxing the ramp's two poses would buy nothing and
+// cost an allocation per bring-up.
+#[allow(clippy::large_enum_variant)]
 enum Bringup {
     /// No torque asked for yet. The loop still reads, publishes and holds — it just cannot make the
     /// robot do anything, which is the correct state for a robot nobody has asked to move.
