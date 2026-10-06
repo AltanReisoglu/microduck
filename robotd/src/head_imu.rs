@@ -105,6 +105,53 @@ const RECORD: usize = 7;
 const GYRO_RAD_PER_LSB: f32 = 0.0175 * std::f32::consts::PI / 180.0;
 const ACCEL_MS2_PER_LSB: f32 = 0.000122 * 9.806_65;
 
+/// The chip's sensor→head mount on the beta's face board: +90° about X, so the head frame is
+/// `x` forward, `y` left, `z` up with the head level — `[x, −z, y]` of the sensor's. Read off a
+/// beta with its head straight (2026-10-06): the chip's `+y` pointed up.
+pub const MOUNT: [f32; 4] = [
+    std::f32::consts::FRAC_1_SQRT_2,
+    std::f32::consts::FRAC_1_SQRT_2,
+    0.0,
+    0.0,
+];
+
+/// Rotate `v` by the unit quaternion `q` (scalar-first).
+fn rotate(q: [f32; 4], v: [f32; 3]) -> [f32; 3] {
+    let [w, x, y, z] = q;
+    let t = [
+        2.0 * (y * v[2] - z * v[1]),
+        2.0 * (z * v[0] - x * v[2]),
+        2.0 * (x * v[1] - y * v[0]),
+    ];
+    [
+        v[0] + w * t[0] + (y * t[2] - z * t[1]),
+        v[1] + w * t[1] + (z * t[0] - x * t[2]),
+        v[2] + w * t[2] + (x * t[1] - y * t[0]),
+    ]
+}
+
+/// Hamilton product `a ⊗ b`, scalar-first.
+fn mul(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
+    [
+        a[0] * b[0] - a[1] * b[1] - a[2] * b[2] - a[3] * b[3],
+        a[0] * b[1] + a[1] * b[0] + a[2] * b[3] - a[3] * b[2],
+        a[0] * b[2] - a[1] * b[3] + a[2] * b[0] + a[3] * b[1],
+        a[0] * b[3] + a[1] * b[2] - a[2] * b[1] + a[3] * b[0],
+    ]
+}
+
+/// A sample in the sensor's axes, put in the head's: vectors rotated by [`MOUNT`], and the
+/// orientation sensor→world turned into head→world (`q ⊗ MOUNT⁻¹`), as the body IMU's decoder
+/// does with its own mount.
+fn to_head(gyro: [f32; 3], accel: [f32; 3], quat: [f32; 4]) -> Sample {
+    let inverse = [MOUNT[0], -MOUNT[1], -MOUNT[2], -MOUNT[3]];
+    Sample {
+        gyro: rotate(MOUNT, gyro),
+        accel: rotate(MOUNT, accel),
+        quat: mul(quat, inverse),
+    }
+}
+
 /// One fused sample out of the FIFO, before it is stamped.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Sample {
@@ -139,11 +186,7 @@ pub fn decode(burst: &[u8], last: &mut ([f32; 3], [f32; 3])) -> Vec<Sample> {
                 });
                 // The chip sends x, y, z of a unit quaternion with w >= 0; w is what is left.
                 let w = (1.0 - x * x - y * y - z * z).max(0.0).sqrt();
-                out.push(Sample {
-                    gyro: last.0,
-                    accel: last.1,
-                    quat: [w, x, y, z],
-                });
+                out.push(to_head(last.0, last.1, [w, x, y, z]));
             }
             // Timestamps, temperature and the rest are not batched; skip anything else.
             _ => {}
@@ -468,15 +511,20 @@ mod tests {
         let samples = decode(&burst, &mut last);
         assert_eq!(samples.len(), 1);
         let s = samples[0];
-        // 0x06f1 = 1777 LSB * 17.5 mdps = 31.1 dps = 0.543 rad/s.
+        // Sensor x is head x: 0x06f1 = 1777 LSB * 17.5 mdps = 31.1 dps = 0.543 rad/s.
         assert!((s.gyro[0] - 0.5428).abs() < 1e-3, "{:?}", s.gyro);
-        // 0x1414 = 5140 LSB * 0.122 mg = 0.627 g = 6.15 m/s².
-        assert!((s.accel[1] - 6.150).abs() < 1e-2, "{:?}", s.accel);
+        // Sensor y is head z: 0x1414 = 5140 LSB * 0.122 mg = 0.627 g = 6.15 m/s².
+        assert!((s.accel[2] - 6.150).abs() < 1e-2, "{:?}", s.accel);
+        // The chip read ~92.6° about its x with the head level; in head axes that is ~2.6°.
         let [w, x, y, z] = s.quat;
-        assert!((x - 0.7231).abs() < 1e-3);
         let norm = (w * w + x * x + y * y + z * z).sqrt();
         assert!((norm - 1.0).abs() < 1e-3, "unit quaternion, got {norm}");
-        assert!(w >= 0.0);
+        let tilt = 2.0 * w.abs().min(1.0).acos().to_degrees();
+        assert!(
+            tilt < 4.0,
+            "a level head reads near-identity, got {tilt}° ({:?})",
+            s.quat
+        );
     }
 
     /// A burst that starts with a quaternion pairs it with the previous burst's gyro and accel.
@@ -485,9 +533,18 @@ mod tests {
         let mut last = ([1.0, 2.0, 3.0], [4.0, 5.0, 6.0]);
         let burst = record(TAG_SFLP_GAME, [0, 0, 0, 0, 0, 0]);
         let samples = decode(&burst, &mut last);
-        assert_eq!(samples[0].gyro, [1.0, 2.0, 3.0]);
-        assert_eq!(samples[0].accel, [4.0, 5.0, 6.0]);
-        assert_eq!(samples[0].quat, [1.0, 0.0, 0.0, 0.0]);
+        // [x, y, z] of the sensor is [x, -z, y] of the head.
+        let close = |a: [f32; 3], b: [f32; 3]| a.iter().zip(b).all(|(p, q)| (p - q).abs() < 1e-5);
+        assert!(
+            close(samples[0].gyro, [1.0, -3.0, 2.0]),
+            "{:?}",
+            samples[0].gyro
+        );
+        assert!(
+            close(samples[0].accel, [4.0, -6.0, 5.0]),
+            "{:?}",
+            samples[0].accel
+        );
     }
 
     #[test]
@@ -496,6 +553,19 @@ mod tests {
         burst.extend([0x13 << 3, 1, 2]); // cut short
         let mut last = ([0.0; 3], [0.0; 3]);
         assert!(decode(&burst, &mut last).is_empty());
+    }
+
+    /// The mount itself: gravity along the chip's +y (how it sits on a level head) is +z in the
+    /// head frame, and the chip's x stays forward.
+    #[test]
+    fn the_mount_puts_the_chips_y_up() {
+        let up = to_head([0.0; 3], [0.0, 9.8, 0.0], [1.0, 0.0, 0.0, 0.0]).accel;
+        assert!(
+            (up[2] - 9.8).abs() < 1e-4 && up[0].abs() < 1e-4 && up[1].abs() < 1e-4,
+            "{up:?}"
+        );
+        let fwd = to_head([1.0, 0.0, 0.0], [0.0; 3], [1.0, 0.0, 0.0, 0.0]).gyro;
+        assert!((fwd[0] - 1.0).abs() < 1e-5, "{fwd:?}");
     }
 
     #[test]

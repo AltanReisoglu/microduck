@@ -591,6 +591,8 @@ struct RobotState {
     head_imu_tx: tokio::sync::broadcast::Sender<proto::HeadImuFrame>,
     /// What a `head_imu.stream` subscriber is told before the frames: the chip, or why none.
     head_imu: head_imu::HeadImuStatus,
+    /// Which board this robot is (`[board] version`). Decides the body IMU's mount.
+    board: robotd_params::board::Board,
     /// Why the policy is not loaded, if it is not. Set once at startup; the loop keeps
     /// running and holds the pose, so a broken bundle is a rollback rather than a crash.
     policy_error: ArcSwapOption<String>,
@@ -724,6 +726,7 @@ impl RobotState {
             chorale_tx: tokio::sync::broadcast::Sender::new(8),
             head_imu_tx: tokio::sync::broadcast::Sender::new(head_imu::FRAME_BUFFER),
             head_imu: head_imu::HeadImuStatus::new(),
+            board: params.board.version,
             policy_error: ArcSwapOption::empty(),
             policy_change_error: ArcSwapOption::empty(),
             policies: ArcSwap::from_pointee(PolicyNames::of(&params.policy.resolved())),
@@ -1091,7 +1094,7 @@ fn run_init(params: &Params, duration: Duration) -> ExitCode {
     // The same open as the daemon's, replacement adoption included: `init` is what someone
     // reaches for right after a motor swap, and it must not be the one path that refuses the
     // new servo.
-    let Some(mut io) = open_bus(&params.bus, 0, &mut Vec::new()) else {
+    let Some(mut io) = open_bus(&params.bus, params.board.version, 0, &mut Vec::new()) else {
         return ExitCode::FAILURE;
     };
     if let Err(e) = io.set_torque(true) {
@@ -1299,7 +1302,7 @@ async fn open_bus_waiting(bus: &params::Bus, state: &RobotState) -> Option<BusIo
         // Logging lives in `open_bus`, which is chatty by design on the first attempt and
         // quiet thereafter — a board waiting overnight must not fill the journal.
         let mut missing = Vec::new();
-        if let Some(io) = open_bus(bus, attempt, &mut missing) {
+        if let Some(io) = open_bus(bus, state.board, attempt, &mut missing) {
             state.startup_bus_failures.store(0, Ordering::Relaxed);
             state.startup_missing.store(Arc::new(Vec::new()));
             return Some(io);
@@ -1321,8 +1324,23 @@ async fn open_bus_waiting(bus: &params::Bus, state: &RobotState) -> Option<BusIo
 }
 
 /// Open and verify the bus, or explain why not.
+/// The body IMU's sensor→trunk mount on `board`: the power board stands on edge in a `zero3`
+/// and lies flat in a `beta`.
+fn body_imu_mount(board: robotd_params::board::Board) -> [f64; 4] {
+    use duck_control::imu::SflpDecoder;
+    match board {
+        robotd_params::board::Board::Zero3 => SflpDecoder::DEFAULT_MOUNT,
+        robotd_params::board::Board::Beta => SflpDecoder::BETA_MOUNT,
+    }
+}
+
 #[cfg(target_os = "linux")]
-fn open_bus(bus: &params::Bus, attempt: u32, missing: &mut Vec<u8>) -> Option<BusIo> {
+fn open_bus(
+    bus: &params::Bus,
+    board: robotd_params::board::Board,
+    attempt: u32,
+    missing: &mut Vec<u8>,
+) -> Option<BusIo> {
     // First attempt and every thirtieth — about one line per 30 s while waiting.
     let loud = attempt == 0 || attempt.is_multiple_of(STARTUP_READ_LOG_EVERY);
     let port = bus.port.as_str();
@@ -1336,6 +1354,7 @@ fn open_bus(bus: &params::Bus, attempt: u32, missing: &mut Vec<u8>) -> Option<Bu
             return None;
         }
     };
+    io.set_imu_mount(body_imu_mount(board));
     // Under the same `loud` rule as everything else here — a board waiting on servo power
     // retries this forever. Worth saying at all because the whole tick budget hangs off it,
     // and "turned off in robotd.toml" is otherwise indistinguishable from "this board is slow".
@@ -1427,7 +1446,12 @@ fn adopt_missing_servo(io: &mut BusIo, loud: bool, silent: &mut Vec<u8>) -> bool
 }
 
 #[cfg(not(target_os = "linux"))]
-fn open_bus(_bus: &params::Bus, _attempt: u32, _missing: &mut Vec<u8>) -> Option<BusIo> {
+fn open_bus(
+    _bus: &params::Bus,
+    _board: robotd_params::board::Board,
+    _attempt: u32,
+    _missing: &mut Vec<u8>,
+) -> Option<BusIo> {
     tracing::error!("no bus on this platform; use --fake");
     None
 }

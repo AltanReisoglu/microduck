@@ -143,6 +143,13 @@ impl DynamixelIo {
         })
     }
 
+    /// The body IMU's sensor→trunk mount, which is the robot's ([`SflpDecoder::DEFAULT_MOUNT`]
+    /// for a `zero3`, [`SflpDecoder::BETA_MOUNT`] for a `beta`). Starts the decoder afresh, so
+    /// call it right after [`Self::open`], before the first read.
+    pub fn set_imu_mount(&mut self, mount: [f64; 4]) {
+        self.imu = SflpDecoder::new(mount);
+    }
+
     /// Assert — and correct — the EEPROM registers the control loop depends on.
     ///
     /// Returns how many needed fixing. A servo that has been factory-reset or swapped in
