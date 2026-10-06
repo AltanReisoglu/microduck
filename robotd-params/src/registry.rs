@@ -404,7 +404,7 @@ pub const REGISTRY: &[Entry] = &[
     feature(
         "head_imu.enabled",
         Kind::Bool,
-        "Read the head IMU (BMI088) at all — off by default; ~4% of a core when on",
+        "Read the head IMU at all — default off on zero3 (BMI088, ~4% of a core), on on beta (LSM6DSV16X, fused on the chip)",
     ),
     // ── [audio] ──────────────────────────────────────────────────────────────
     feature(

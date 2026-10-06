@@ -242,9 +242,22 @@ async fn main() -> std::process::ExitCode {
     // Skipped for --sim/--fake too: there is no real bus behind either.
     let imu_status = Arc::new(ImuStatus::new(args.imu_hz));
     let (imu_frames, _) = tokio::sync::broadcast::channel(imu::FRAME_BUFFER);
-    let configured = params.head_imu.enabled;
-    let wanted = args.imu || (configured && !args.no_imu);
-    let imu_thread = if !wanted || args.fake || args.sim.is_some() {
+    // The beta's head IMU is a different chip on a different bus, and `robotd` reads it
+    // (robotd/src/head_imu.rs). There is nothing of tofd's on that board to read, so a
+    // subscriber here is pointed at the daemon that does serve it — even under `--imu`, which
+    // would only sweep the buses for a BMI088 that is not fitted.
+    let board = params.board.version;
+    let served_elsewhere = board != robotd_params::board::Board::Zero3;
+    let configured = params.head_imu.enabled_on(board);
+    let wanted = !served_elsewhere && (args.imu || (configured && !args.no_imu));
+    let imu_thread = if served_elsewhere {
+        tracing::info!(
+            board = board.label(),
+            "the head IMU on this board is robotd's"
+        );
+        imu_status.elsewhere(robotd_params::HeadImuParams::reader(board));
+        None
+    } else if !wanted || args.fake || args.sim.is_some() {
         // Said out loud, and said by the stream too: a subscriber gets this sentence instead of
         // frames, because "no samples" and "no BMI088 fitted" are different answers and only one
         // of them is somebody's mistake.

@@ -142,7 +142,7 @@ Three properties worth trusting:
   daemon's own loader first, atomically (temp file + rename), and rejected with the reason.
 
 Saving offers what the change actually needs, from the daemon that actually reads it: a restart
-for most keys (`[media]` and `[duck_detector]` are `mediad`'s, `[head_imu]` is `tofd`'s), a `robotd`
+for most keys (`[media]` and `[duck_detector]` are `mediad`'s, `[head_imu]` is `tofd`'s on a zero3 and `robotd`'s on a beta), a `robotd`
 *reload* for `[policy]` — the motors stay powered — and nothing at all for `[pad]`,
 `[pad_imu_head_control]` and `[pad_drive]`, which `padd` picks up within a second. `sudo`, because the file
 is root-owned — without it the editor opens read-only and says so on the first write.
@@ -821,13 +821,20 @@ interchangeable on the board, and the daemon picks the driver from an ID read.
 
 #### The head IMU (`head_imu.stream`)
 
-`tofd` also serves the head module's BMI088 — gyro, acceleration and a Madgwick
-orientation — and it is **off by default**: `[head_imu] enabled` in `robotd.toml`,
-set with `robotctl configure`, which offers the `tofd` restart. Reading it costs
-~4% of a core at 100 Hz and nothing subscribes yet, so a duck that is not mapping
-was paying that from boot. A subscriber while it is off gets a reason naming the
-key, not the silence an unfitted sensor gives. `tofd --imu` reads it for one
-session without touching the file, and `--imu-hz` trades rate for cost linearly.
+Gyro, acceleration and an orientation from the IMU in the head. Which chip, and
+which daemon serves the stream, depends on the board:
+
+- **zero3**: `tofd` reads the HAT's BMI088 with a Madgwick fusion, **off by
+  default**. It costs ~4% of a core at 100 Hz. `tofd --imu` reads it for one
+  session without touching the file, and `--imu-hz` trades rate for cost.
+- **beta**: `robotd` reads the face board's LSM6DSV16X at 60 Hz, **on by
+  default**. The chip fuses the orientation itself and batches samples, so it
+  costs a burst read 15 times a second and no fusion on the CPU.
+
+`[head_imu] enabled` in `robotd.toml` overrides either default; `robotctl
+configure` offers the restart of whichever daemon reads it. Ask the other
+daemon and the answer names the right one; while it is off, the answer names
+the key, not the silence an unfitted sensor gives.
 
 None of this touches depth: the ToF ranges either way, so the grid above works on
 a duck whose IMU has never been switched on.
