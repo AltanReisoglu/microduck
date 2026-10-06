@@ -236,6 +236,8 @@ pub struct Controller {
     /// `Sit::Sitting` from the first tick, but the robot is still travelling, and standing it
     /// back up halfway down is one move cut into another.
     sit_settle: f64,
+    /// Stand up by itself once `sit_settle` runs out — [`Self::settle_then_rise`].
+    auto_rise: bool,
     /// The network the last [`Self::step`] ran. `None` before the first.
     last_net: Option<Net>,
 }
@@ -252,6 +254,7 @@ impl Controller {
             active: None,
             sit: Sit::Up,
             sit_settle: 0.0,
+            auto_rise: false,
             last_net: None,
         }
     }
@@ -295,6 +298,7 @@ impl Controller {
         self.active = from.active;
         self.sit = from.sit;
         self.sit_settle = from.sit_settle;
+        self.auto_rise = from.auto_rise;
         self.last_net = from.last_net;
     }
 
@@ -320,6 +324,7 @@ impl Controller {
         self.ground_pick = None;
         self.active = None;
         self.sit_settle = 0.0;
+        self.auto_rise = false;
         if matches!(self.sit, Sit::Rising { .. }) {
             self.sit = Sit::Up;
         }
@@ -335,6 +340,7 @@ impl Controller {
         self.active = None;
         self.sit = Sit::Up;
         self.sit_settle = 0.0;
+        self.auto_rise = false;
     }
 
     /// Why a new move cannot start now, or `None` when it can.
@@ -487,14 +493,33 @@ impl Controller {
             self.sit = Sit::Up;
         }
         self.sit_settle = 0.0;
+        self.auto_rise = false;
     }
 
-    /// The robot was found sitting as the policy took over: rise through the sitstand network,
-    /// which then hands over to the gait, instead of giving the gait a seated robot.
-    pub fn begin_rise_from_seat(&mut self) {
-        self.sit = Sit::Rising {
-            remaining: self.skills.sitstand_rise_s,
-        };
+    /// The robot was found sitting as the policy took over: settle into the seat with the
+    /// sitstand network for the seat's settle time, then rise, then the gait.
+    ///
+    /// The same sequence as a rise while the robot runs, which is the one that works: there the
+    /// network has held the seat for a while and rises from *its* seat with a warm history. Rising
+    /// on the first tick instead started it cold, from a seat it had not chosen.
+    pub fn settle_then_rise(&mut self) {
+        self.sit = Sit::Sitting;
+        self.sit_settle = self.skills.sitstand_ramp_s;
+        self.auto_rise = true;
+    }
+
+    /// Start the feedback state from a pose the robot is holding rather than from zero.
+    ///
+    /// [`Self::reset`] zeroes the previous action and drops the low-pass anchor, which is right
+    /// for a robot standing at home — a zero action *is* the home pose — and wrong for one held
+    /// anywhere else: the network would observe "I just commanded home" from a seat, and its
+    /// first targets would go out unfiltered. Here the previous action is the offset that would
+    /// have produced `pose` (the sitstand network runs at action scale 1), and the filter starts
+    /// from it.
+    pub fn seed_from_pose(&mut self, pose: &[f64; NUM_JOINTS]) {
+        let offsets: [f64; NUM_JOINTS] = std::array::from_fn(|j| pose[j] - DEFAULT_POSITION[j]);
+        self.last_action = Observation::gather_action(&offsets);
+        self.previous = Some(*pose);
     }
 
     /// One tick.
@@ -555,6 +580,12 @@ impl Controller {
             && remaining <= 0.0
         {
             self.sit = Sit::Up;
+        }
+        if self.auto_rise && self.sit == Sit::Sitting && self.sit_settle <= 0.0 {
+            self.auto_rise = false;
+            self.sit = Sit::Rising {
+                remaining: self.skills.sitstand_rise_s,
+            };
         }
 
         // Re-encode the command for the active skill and pick the network. The priority chain
@@ -933,6 +964,40 @@ mod tests {
         assert!(c.is_sitting());
         assert!(c.start_ground_pick().is_err(), "no pick from it");
         assert_eq!(c.sit_toggle(), Ok("stand"), "no settle to wait out");
+    }
+
+    /// Found sitting at the start: it sits (settles) first, refusing everything meanwhile, then
+    /// rises by itself and ends standing.
+    #[test]
+    #[ignore = "requires ONNX Runtime >= 1.23"]
+    fn a_seat_found_at_the_start_settles_then_rises_by_itself() {
+        let mut c = full_controller();
+        c.settle_then_rise();
+        tick(&mut c, 1.0);
+        assert!(c.is_sitting(), "still settling");
+        assert!(c.sit_toggle().is_err(), "no toggling mid-settle");
+        tick(&mut c, 1.1);
+        assert!(!c.is_sitting() && c.busy(), "rising by itself");
+        tick(&mut c, 1.1);
+        assert!(!c.is_sitting() && !c.busy(), "standing: the gait has it");
+    }
+
+    /// Seeding from a pose makes the previous action the offset that pose is from home.
+    #[test]
+    #[ignore = "requires ONNX Runtime >= 1.23"]
+    fn seeding_from_a_pose_sets_the_previous_action() {
+        let mut c = full_controller();
+        let mut pose = DEFAULT_POSITION;
+        pose[3] += 1.0;
+        c.seed_from_pose(&pose);
+        assert_eq!(c.previous, Some(pose));
+        assert!((c.last_action[3] - 1.0).abs() < 1e-6);
+        assert!(
+            c.last_action
+                .iter()
+                .enumerate()
+                .all(|(i, a)| i == 3 || *a == 0.0)
+        );
     }
 
     /// A deliberate stop keeps the seat and drops the move in flight; a reset forgets both.

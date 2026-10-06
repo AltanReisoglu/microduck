@@ -2917,6 +2917,10 @@ async fn control_loop<T: RobotIo>(
         if !snapshot.enabled {
             posture_checked = false;
         }
+        // Set below when the policy is about to take over a seated robot, so its feedback state
+        // starts from the seat it is holding rather than from the home pose — see
+        // `Controller::seed_from_pose`.
+        let mut start_from_hold = false;
         if snapshot.enabled
             && !posture_checked
             && !was_driving
@@ -2933,8 +2937,13 @@ async fn control_loop<T: RobotIo>(
                 let tilt = format!("{:.0}°", reading.tilt_deg);
                 match reading.posture {
                     posture::Posture::Seated if controller.has_sitstand() => {
-                        tracing::warn!(%height, %tilt, "posture: seated — rising via the sitstand policy");
-                        controller.begin_rise_from_seat();
+                        tracing::warn!(
+                            %height,
+                            %tilt,
+                            "posture: seated — settling into the seat, then rising via the sitstand policy"
+                        );
+                        controller.settle_then_rise();
+                        start_from_hold = true;
                     }
                     verdict => {
                         let what = match verdict {
@@ -2978,6 +2987,10 @@ async fn control_loop<T: RobotIo>(
                 && let Some(controller) = controller.as_mut()
             {
                 controller.reset();
+            }
+            // A seated robot is held in its seat, not at home: start the network from there.
+            if start_from_hold && let Some(controller) = controller.as_mut() {
+                controller.seed_from_pose(&hold);
             }
         }
         if was_driving && !driving {

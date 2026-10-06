@@ -484,7 +484,11 @@ reads seated ramps to the seat — the sitstand policy's own trained SIT keyfram
 straight-legged to the standing home pose, which pulls it out of the seat and over backwards.
 And once per enable, before the policy takes over, because the ramp is open-loop: a robot that
 started folded can end it standing, sat back on its seat or on its back. That second look is
-taken even over a seat the controller already believes in. The verdict comes from the trunk's height above the feet — the
+taken even over a seat the controller already believes in. A seated verdict then runs the same
+sequence as a rise while the robot drives — the sitstand network holds the seat for its settle
+time, then rises — with its previous action and low-pass seeded from the held seat rather than
+zeroed: rising on the first tick, cold, from a seat the network had not chosen, went visibly
+worse than the same rise mid-session. The verdict comes from the trunk's height above the feet — the
 feet sites through the kinematic model, turned into the world by the IMU — and the trunk's tilt.
 Seated, the sitstand network rises first; standing, lying down (tilt past 45°) or in between,
 the gait takes over as it always has. The check picks how the policy starts, never whether: a
