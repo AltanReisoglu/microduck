@@ -548,6 +548,9 @@ struct RobotState {
     /// reading the startup pose. Non-zero means the loop is still waiting for a robot to
     /// answer and has never commanded anything.
     startup_bus_failures: AtomicU32,
+    /// While waiting: the servo IDs the last ping round found silent. Empty once the bus is up,
+    /// and when the port would not open at all — then nothing was asked.
+    startup_missing: ArcSwap<Vec<u8>>,
     /// Motor-bus voltage, EMA-smoothed, as `f64::to_bits`. Zero means *not read yet* — a
     /// distinction that has to survive to the wire, since zero volts and unknown volts look
     /// nothing alike to whoever is deciding whether to charge the robot.
@@ -703,6 +706,7 @@ impl RobotState {
             achieved_hz: AtomicU64::new(0),
             consecutive_errors: AtomicU32::new(0),
             startup_bus_failures: AtomicU32::new(0),
+            startup_missing: ArcSwap::from_pointee(Vec::new()),
             battery_v: AtomicU64::new(0),
             motor_max_c: AtomicU64::new(0),
             motor_mean_c: AtomicU64::new(0),
@@ -769,6 +773,7 @@ impl RobotState {
                 bus: proto::BusHealth {
                     consecutive_errors: self.consecutive_errors.load(Ordering::Relaxed),
                     startup_failures: self.startup_bus_failures.load(Ordering::Relaxed),
+                    missing: self.startup_missing.load().as_ref().clone(),
                 },
                 imu: Some(proto::ImuHealth {
                     ready: self.imu_ready.load(Ordering::Relaxed),
@@ -794,6 +799,26 @@ impl RobotState {
             if waiting > 0 {
                 // Degraded, not unhealthy: an unpowered bench board must not roll back every
                 // release shipped to it. The bus not answering is the same before and after.
+                //
+                // Some servos answering is not "no robot": the robot is there with parts of it
+                // unplugged, and the fix is finding those, not the power switch.
+                let bus = proto::BusHealth {
+                    missing: self.startup_missing.load().as_ref().clone(),
+                    ..Default::default()
+                };
+                if bus.partly_missing() {
+                    return degraded(format!(
+                        "servo{} {} not answering on the motor bus after {waiting} attempts; \
+                         {} plugged in?",
+                        if bus.missing.len() == 1 { "" } else { "s" },
+                        bus.describe_missing(),
+                        if bus.missing.len() == 1 {
+                            "is it"
+                        } else {
+                            "are they"
+                        },
+                    ));
+                }
                 return degraded(format!(
                     "no robot on the motor bus after {waiting} attempts; \
                      is servo power on and the bus wired?"
@@ -1059,7 +1084,7 @@ fn run_init(params: &Params, duration: Duration) -> ExitCode {
     // The same open as the daemon's, replacement adoption included: `init` is what someone
     // reaches for right after a motor swap, and it must not be the one path that refuses the
     // new servo.
-    let Some(mut io) = open_bus(&params.bus, 0) else {
+    let Some(mut io) = open_bus(&params.bus, 0, &mut Vec::new()) else {
         return ExitCode::FAILURE;
     };
     if let Err(e) = io.set_torque(true) {
@@ -1171,11 +1196,80 @@ fn spawn_control_thread(
             // loop has not completed a cycle yet", forever, whatever happened to the robot
             // afterwards. Retrying the read alone was not enough: execution never got there.
             runtime.block_on(async move {
-                if let Some(io) = open_bus_waiting(&bus, &state).await {
+                // The voice works while the bus does not: a robot waiting on unplugged servos
+                // still quacks. Stopped before the loop starts, which then owns the speaker.
+                let waiting_voice = WaitingVoice::start(&params, Arc::clone(&intents));
+                let io = open_bus_waiting(&bus, &state).await;
+                drop(waiting_voice);
+                if let Some(io) = io {
                     control_loop(io, state, intents, params, params_path, period, poweroff).await;
                 }
             });
         })
+}
+
+/// How often the waiting voice looks for a queued sound. The loop takes them every 20 ms tick;
+/// this matches it, so a quack sounds the same whether the bus is up or not.
+const WAITING_VOICE_POLL: Duration = Duration::from_millis(20);
+
+/// One-shot sounds while the bus is not up yet.
+///
+/// Sounds are played from the control loop, once a tick — and there are no ticks until the bus
+/// answers, so a robot with servos unplugged or unpowered accepted `robotctl quack` and never
+/// played it. The speaker needs none of the servos. This plays the queued one-shots from a thread
+/// of its own for as long as [`open_bus_waiting`] waits, and is dropped before the loop builds its
+/// own voice, so the PCM has one owner at a time.
+///
+/// One-shots only: the wheee ride, the theremin and the chorale are the loop's, because they
+/// follow what the robot is doing, and a robot waiting for its bus is doing nothing.
+struct WaitingVoice {
+    stop: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl WaitingVoice {
+    /// `None` when audio is off — the IPC refuses sounds then anyway — or the thread will not
+    /// start, which only costs the sounds until the bus is up.
+    fn start(params: &Params, intents: Arc<Intents>) -> Option<Self> {
+        if !params.audio.enabled {
+            return None;
+        }
+        // The same device choice the loop makes, so a board without the configured card plays
+        // on ALSA's default here too.
+        let audio = params.audio.resolve_devices(&robotd_params::alsa_card_ids(
+            &std::fs::read_to_string("/proc/asound/cards").unwrap_or_default(),
+        ));
+        let mut voice = sound::Sound::new(params.audio.bank.clone(), audio.playback);
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopped = Arc::clone(&stop);
+        let thread = std::thread::Builder::new()
+            .name("waiting-voice".into())
+            .spawn(move || {
+                while !stopped.load(Ordering::Relaxed) {
+                    for tag in intents.take_sounds() {
+                        voice.play(tag.as_str(), false);
+                    }
+                    std::thread::sleep(WAITING_VOICE_POLL);
+                }
+            })
+            .map_err(|e| {
+                tracing::warn!(error = %e, "no voice until the bus is up");
+            })
+            .ok()?;
+        Some(Self {
+            stop,
+            thread: Some(thread),
+        })
+    }
+}
+
+impl Drop for WaitingVoice {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
 }
 
 /// The real bus on the board; a fake elsewhere, so `open_bus_waiting` has one signature.
@@ -1197,12 +1291,16 @@ async fn open_bus_waiting(bus: &params::Bus, state: &RobotState) -> Option<BusIo
     while !state.shutdown.load(Ordering::Relaxed) {
         // Logging lives in `open_bus`, which is chatty by design on the first attempt and
         // quiet thereafter — a board waiting overnight must not fill the journal.
-        if let Some(io) = open_bus(bus, attempt) {
+        let mut missing = Vec::new();
+        if let Some(io) = open_bus(bus, attempt, &mut missing) {
             state.startup_bus_failures.store(0, Ordering::Relaxed);
+            state.startup_missing.store(Arc::new(Vec::new()));
             return Some(io);
         }
         attempt += 1;
-        // Published before sleeping, so `robot.health` can name the cause immediately.
+        // Published before sleeping, so `robot.health` can name the cause immediately — and
+        // which servos, when some answered and these did not.
+        state.startup_missing.store(Arc::new(missing));
         state.startup_bus_failures.store(attempt, Ordering::Relaxed);
 
         // Nothing to retry on a platform that has no bus at all.
@@ -1217,7 +1315,7 @@ async fn open_bus_waiting(bus: &params::Bus, state: &RobotState) -> Option<BusIo
 
 /// Open and verify the bus, or explain why not.
 #[cfg(target_os = "linux")]
-fn open_bus(bus: &params::Bus, attempt: u32) -> Option<BusIo> {
+fn open_bus(bus: &params::Bus, attempt: u32, missing: &mut Vec<u8>) -> Option<BusIo> {
     // First attempt and every thirtieth — about one line per 30 s while waiting.
     let loud = attempt == 0 || attempt.is_multiple_of(STARTUP_READ_LOG_EVERY);
     let port = bus.port.as_str();
@@ -1237,7 +1335,7 @@ fn open_bus(bus: &params::Bus, attempt: u32) -> Option<BusIo> {
     if !bus.fast_sync_read && loud {
         tracing::warn!("bus.fast_sync_read is off; every sync read is a plain one");
     }
-    if !adopt_missing_servo(&mut io, loud) {
+    if !adopt_missing_servo(&mut io, loud, missing) {
         return None;
     }
     match io.check_registers() {
@@ -1268,7 +1366,7 @@ fn open_bus(bus: &params::Bus, attempt: u32) -> Option<BusIo> {
 /// unpowered, a servo missing with nothing fresh to replace it, or two missing at once, which
 /// cannot be told apart and is left to a human.
 #[cfg(target_os = "linux")]
-fn adopt_missing_servo(io: &mut BusIo, loud: bool) -> bool {
+fn adopt_missing_servo(io: &mut BusIo, loud: bool, silent: &mut Vec<u8>) -> bool {
     use duck_control::bus::replacement_target;
 
     let missing = match io.missing_servos() {
@@ -1280,6 +1378,9 @@ fn adopt_missing_servo(io: &mut BusIo, loud: bool) -> bool {
             return false;
         }
     };
+    // Handed back whatever happens next, so a wait that ends up refused below can still say
+    // which servos it was waiting for.
+    silent.clone_from(&missing);
     if missing.is_empty() {
         return true;
     }
@@ -1319,7 +1420,7 @@ fn adopt_missing_servo(io: &mut BusIo, loud: bool) -> bool {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn open_bus(_bus: &params::Bus, _attempt: u32) -> Option<BusIo> {
+fn open_bus(_bus: &params::Bus, _attempt: u32, _missing: &mut Vec<u8>) -> Option<BusIo> {
     tracing::error!("no bus on this platform; use --fake");
     None
 }
@@ -7227,6 +7328,46 @@ mod tests {
         assert!(health.healthy);
     }
 
+    /// **A quack while the bus is down is played, not left queued.** Before this, sounds were
+    /// taken only by the control loop's tick, and a robot with servos missing never ticks.
+    #[test]
+    fn the_waiting_voice_takes_sounds_while_there_is_no_loop() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut params = Params::default();
+        params.audio.enabled = true;
+        // No bank: `play` logs once and spawns nothing, so this runs off a board.
+        params.audio.bank = dir.path().join("no-bank");
+        let intents = Arc::new(Intents::new());
+
+        let voice = WaitingVoice::start(&params, Arc::clone(&intents)).expect("audio is on");
+        intents.request_sound(proto::SoundParams {
+            tag: proto::SoundTag::Chirp,
+            hold: None,
+        });
+        std::thread::sleep(WAITING_VOICE_POLL * 10);
+        assert!(
+            intents.take_sounds().is_empty(),
+            "the waiting voice should have taken it"
+        );
+
+        // Dropped, it stops taking: from here the loop owns the sounds.
+        drop(voice);
+        intents.request_sound(proto::SoundParams {
+            tag: proto::SoundTag::Chirp,
+            hold: None,
+        });
+        std::thread::sleep(WAITING_VOICE_POLL * 5);
+        assert_eq!(intents.take_sounds(), vec![proto::SoundTag::Chirp]);
+    }
+
+    /// Audio off is no voice at all, waiting or not.
+    #[test]
+    fn no_waiting_voice_with_audio_off() {
+        let mut params = Params::default();
+        params.audio.enabled = false;
+        assert!(WaitingVoice::start(&params, Arc::new(Intents::new())).is_none());
+    }
+
     /// While waiting, health must say *why*. The update system quotes this string as the
     /// reason it rolled a release back, and "control loop has not completed a cycle yet"
     /// describes a robot that is about to start, not one that cannot see its servos.
@@ -7247,6 +7388,41 @@ mod tests {
             reason.contains("motor bus") && reason.contains("servo power"),
             "unactionable reason: {reason}"
         );
+    }
+
+    /// Some servos answering is a robot with parts unplugged, and the reason names those parts
+    /// rather than sending someone to the power switch.
+    #[test]
+    fn health_names_the_servos_that_did_not_answer() {
+        let s = RobotState::new(
+            &Params::default(),
+            std::path::Path::new("/test/robotd.toml"),
+            false,
+            false,
+        );
+        s.startup_bus_failures.store(4, Ordering::Relaxed);
+        s.startup_missing.store(Arc::new(vec![32, 33, 34]));
+
+        let health = s.health();
+        assert!(
+            health.degraded,
+            "a bench board must not roll a release back"
+        );
+        assert_eq!(health.bus.missing, vec![32, 33, 34]);
+        let reason = health.reason.unwrap();
+        assert!(
+            reason.contains("servos 32 head_yaw, 33 head_roll, 34 mouth not answering"),
+            "{reason}"
+        );
+        assert!(!reason.contains("servo power"), "{reason}");
+
+        s.startup_missing.store(Arc::new(vec![13]));
+        let reason = s.health().reason.unwrap();
+        assert!(
+            reason.starts_with("servo 13 right_knee not answering"),
+            "{reason}"
+        );
+        assert!(reason.contains("is it plugged in?"), "{reason}");
     }
 
     /// **The regression.** A bus that cannot be *opened* — or whose register check fails,

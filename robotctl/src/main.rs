@@ -1919,6 +1919,10 @@ fn render_health(report: &HealthReport) -> String {
 
             let bus = match (health.bus.consecutive_errors, health.bus.startup_failures) {
                 (0, 0) => "ok".to_owned(),
+                // The servos that answered are a robot; the line is about the ones that did not.
+                (0, n) if health.bus.partly_missing() => {
+                    format!("missing {}, {n} attempts", health.bus.describe_missing())
+                }
                 (0, n) => format!("waiting for a robot to answer, {n} attempts"),
                 (n, _) => format!("{n} consecutive read failures"),
             };
@@ -6851,6 +6855,7 @@ mod tests {
                 bus: proto::BusHealth {
                     consecutive_errors: 7,
                     startup_failures: 0,
+                    ..Default::default()
                 },
                 imu: Some(proto::ImuHealth {
                     ready: true,
@@ -6964,6 +6969,7 @@ mod tests {
                 bus: proto::BusHealth {
                     consecutive_errors: 0,
                     startup_failures: 4,
+                    ..Default::default()
                 },
                 ..Default::default()
             }),
@@ -6971,6 +6977,47 @@ mod tests {
         ));
 
         assert!(out.contains("degraded: no robot on the motor bus"), "{out}");
+        assert!(
+            out.contains("waiting for a robot to answer, 4 attempts"),
+            "{out}"
+        );
+    }
+
+    /// **Some servos answering is a robot, not "no robot".** What a beta with its head servos
+    /// unplugged showed as "no robot on the motor bus" while robotd's log named the three.
+    #[test]
+    fn health_names_the_servos_that_are_missing() {
+        let out = render_health(&health_report(
+            Some(proto::HealthResult {
+                degraded: true,
+                bus: proto::BusHealth {
+                    startup_failures: 4,
+                    missing: vec![32, 33, 34],
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            None,
+        ));
+        assert!(
+            out.contains("missing 32 head_yaw, 33 head_roll, 34 mouth, 4 attempts"),
+            "{out}"
+        );
+        assert!(!out.contains("waiting for a robot to answer"), "{out}");
+
+        // All fifteen silent is still servo power, in the words people already know.
+        let out = render_health(&health_report(
+            Some(proto::HealthResult {
+                degraded: true,
+                bus: proto::BusHealth {
+                    startup_failures: 4,
+                    missing: proto::JOINT_IDS.to_vec(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            None,
+        ));
         assert!(
             out.contains("waiting for a robot to answer, 4 attempts"),
             "{out}"
