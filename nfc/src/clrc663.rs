@@ -3,6 +3,8 @@
 use std::thread::sleep;
 use std::time::Duration;
 
+pub use crate::reader::Exchange;
+use crate::reader::Reader;
 use crate::registers as R;
 use crate::transport::{Link, Op, Transport};
 use crate::{Error, Result};
@@ -206,33 +208,12 @@ impl<L: Link> Clrc663<L> {
     }
 }
 
-/// How one exchange with a tag is framed.
-#[derive(Debug, Clone, Copy)]
-pub struct Exchange {
-    pub timeout_ms: u64,
-    pub tx_bits: u8,
-    pub crc: bool,
-    pub rx_crc: Option<bool>,
-}
-
-impl Exchange {
-    /// A standard frame: 8-bit last byte, CRC both ways.
-    pub const fn framed(timeout_ms: u64) -> Self {
-        Self {
-            timeout_ms,
-            tx_bits: 8,
-            crc: true,
-            rx_crc: None,
-        }
+impl<L: Link> Reader for Clrc663<L> {
+    fn reset_field(&mut self) -> Result<()> {
+        Clrc663::reset_field(self)
     }
 
-    /// No CRC either way, as the anticollision and the short requests are.
-    pub const fn bare(timeout_ms: u64, tx_bits: u8) -> Self {
-        Self {
-            timeout_ms,
-            tx_bits,
-            crc: false,
-            rx_crc: None,
-        }
+    fn transceive(&mut self, data: &[u8], exchange: Exchange) -> Result<Vec<u8>> {
+        Clrc663::transceive(self, data, exchange)
     }
 }

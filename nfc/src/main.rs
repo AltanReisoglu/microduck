@@ -31,7 +31,10 @@ use clap::Parser;
 use duck_ipc_proto as proto;
 use nfc::clrc663::Clrc663;
 use nfc::pairing::{self, Outcome, Robot, Touches};
+use nfc::reader::{Exchange, Reader};
 use nfc::serial::Serial;
+use nfc::spi::Spidev;
+use nfc::st25r100::{Antenna, St25r100};
 use nfc::{Error, ndef, tag};
 
 /// Between attempts to open a reader that is not there, doubling to the cap.
@@ -53,9 +56,10 @@ const QUICK_ANSWER: Duration = Duration::from_secs(5);
     version
 )]
 struct Args {
-    /// The reader's serial port.
-    #[arg(long, default_value = "/dev/ttyACM0")]
-    device: PathBuf,
+    /// The reader: a serial port for the CLRC663 on USB, or `/dev/spidev*` for the beta board's
+    /// ST25R100. Absent, the board decides: `/dev/spidev1.0` on a beta, `/dev/ttyACM0` otherwise.
+    #[arg(long)]
+    device: Option<PathBuf>,
 
     /// Polls a second. Detecting a tag alone costs ~35 ms, so 20 is the ceiling.
     #[arg(long, default_value_t = 5.0)]
@@ -89,23 +93,24 @@ fn main() -> std::process::ExitCode {
         robot: args.robot_socket.clone(),
     };
 
+    let device = args.device.clone().unwrap_or_else(default_device);
     let mut backoff = RETRY_MIN;
     // The last reason there was no reader, so a reader that stays absent is one line, not one a
     // retry.
     let mut said: Option<String> = None;
     loop {
-        match open(&args.device) {
+        match open(&device) {
             Ok(mut chip) => {
-                tracing::warn!(device = %args.device.display(), hz = args.hz, "reader up — touch a tag");
+                tracing::warn!(device = %device.display(), hz = args.hz, "reader up — touch a tag");
                 said = None;
                 backoff = RETRY_MIN;
                 let why = watch(&mut chip, period, &mut robot);
-                tracing::warn!(device = %args.device.display(), error = %why, "reader lost");
+                tracing::warn!(device = %device.display(), error = %why, "reader lost");
             }
             Err(e) => {
                 let why = e.to_string();
                 if said.as_deref() != Some(why.as_str()) {
-                    tracing::info!(device = %args.device.display(), error = %why, "no NFC reader; retrying");
+                    tracing::info!(device = %device.display(), error = %why, "no NFC reader; retrying");
                     said = Some(why);
                 }
                 sleep(backoff);
@@ -115,18 +120,88 @@ fn main() -> std::process::ExitCode {
     }
 }
 
-fn open(device: &Path) -> nfc::Result<Clrc663<Serial>> {
-    let mut chip = Clrc663::new(Serial::open(device)?);
+/// The reader this board has, when nobody named one.
+fn default_device() -> PathBuf {
+    match robotd_params::board::Board::detected() {
+        Some(robotd_params::board::Board::Beta) => PathBuf::from("/dev/spidev1.0"),
+        _ => PathBuf::from("/dev/ttyACM0"),
+    }
+}
+
+/// Either reader, behind the one interface the tag layer uses.
+enum Chip {
+    /// The bench reader: a CLRC663 on USB serial.
+    Usb(Clrc663<Serial>),
+    /// The beta board's ST25R100, with its two antennas polled in turn.
+    Spi(St25r100<Spidev>),
+}
+
+impl Chip {
+    fn begin(&mut self) -> nfc::Result<()> {
+        match self {
+            Chip::Usb(c) => c.begin(),
+            Chip::Spi(c) => c.begin(),
+        }
+    }
+
+    fn field_off(&mut self) -> nfc::Result<()> {
+        match self {
+            Chip::Usb(c) => c.field_off(),
+            Chip::Spi(c) => c.field_off(),
+        }
+    }
+
+    /// Look for a tag on every antenna in turn; the first one seen wins, and the field stays on
+    /// that antenna for whatever is read next.
+    fn select(&mut self) -> nfc::Result<Vec<u8>> {
+        let Chip::Spi(c) = self else {
+            return tag::select(self);
+        };
+        let mut last = Error::NoTag;
+        for antenna in [Antenna::One, Antenna::Two] {
+            c.set_antenna(antenna)?;
+            match tag::select(c) {
+                Ok(uid) => return Ok(uid),
+                Err(e) if e.is_tag() => last = e,
+                Err(e) => return Err(e),
+            }
+        }
+        Err(last)
+    }
+}
+
+impl Reader for Chip {
+    fn reset_field(&mut self) -> nfc::Result<()> {
+        match self {
+            Chip::Usb(c) => Reader::reset_field(c),
+            Chip::Spi(c) => c.reset_field(),
+        }
+    }
+
+    fn transceive(&mut self, data: &[u8], exchange: Exchange) -> nfc::Result<Vec<u8>> {
+        match self {
+            Chip::Usb(c) => Reader::transceive(c, data, exchange),
+            Chip::Spi(c) => c.transceive(data, exchange),
+        }
+    }
+}
+
+fn open(device: &Path) -> nfc::Result<Chip> {
+    let mut chip = if device.to_string_lossy().starts_with("/dev/spidev") {
+        Chip::Spi(St25r100::new(Spidev::open(device)?, Antenna::One))
+    } else {
+        Chip::Usb(Clrc663::new(Serial::open(device)?))
+    };
     chip.begin()?;
     Ok(chip)
 }
 
 /// Poll until the reader stops answering, acting on every touch. Returns why it stopped.
-fn watch(chip: &mut Clrc663<Serial>, period: Duration, robot: &mut dyn Robot) -> Error {
+fn watch(chip: &mut Chip, period: Duration, robot: &mut dyn Robot) -> Error {
     let mut touches = Touches::default();
     loop {
         let start = Instant::now();
-        let uid = match tag::select(chip) {
+        let uid = match chip.select() {
             Ok(uid) => Some(uid),
             Err(e) if e.is_tag() => None,
             Err(e) => {

@@ -26,6 +26,8 @@ path = "src/main.rs"
 [dependencies]
 clap = { workspace = true, features = ["derive"] }
 duck-ipc-proto = { path = "../duck-ipc-proto" }
+# Only for which board this is, so the reader is found without configuration.
+robotd-params = { path = "../robotd-params" }
 libc = "0.2"
 serde.workspace = true
 serde_json.workspace = true

@@ -2,8 +2,7 @@
 //!
 //! One tag is assumed in the field. A collision is reported, not resolved.
 
-use crate::clrc663::{Clrc663, Exchange};
-use crate::transport::Link;
+use crate::reader::{Exchange, Reader};
 use crate::{Error, Result};
 
 const CMD_WUPA: u8 = 0x52;
@@ -19,9 +18,9 @@ pub const PAGE_USER_END: u8 = 129;
 /// Wake whatever tag is in the field — WUPA rather than REQA, since it also wakes one in HALT —
 /// and select it. Returns its UID.
 ///
-/// Resets the field first: see [`Clrc663::reset_field`] for why that is what makes a second read
+/// Resets the field first: see [`crate::clrc663::Clrc663::reset_field`] for why that is what makes a second read
 /// in a session work.
-pub fn select<L: Link>(chip: &mut Clrc663<L>) -> Result<Vec<u8>> {
+pub fn select<R: Reader>(chip: &mut R) -> Result<Vec<u8>> {
     chip.reset_field()?;
     let atqa = chip.transceive(&[CMD_WUPA], Exchange::bare(5, 7))?;
     if atqa.len() != 2 {
@@ -74,7 +73,7 @@ pub fn select<L: Link>(chip: &mut Clrc663<L>) -> Result<Vec<u8>> {
 }
 
 /// READ: 16 bytes, four pages from `page`.
-pub fn read_pages<L: Link>(chip: &mut Clrc663<L>, page: u8) -> Result<Vec<u8>> {
+pub fn read_pages<R: Reader>(chip: &mut R, page: u8) -> Result<Vec<u8>> {
     let answer = chip.transceive(&[CMD_READ, page], Exchange::framed(10))?;
     if answer.len() != 16 {
         return Err(Error::Tag(format!(
@@ -86,7 +85,7 @@ pub fn read_pages<L: Link>(chip: &mut Clrc663<L>, page: u8) -> Result<Vec<u8>> {
 }
 
 /// FAST_READ of pages `first..=last`, in one exchange.
-pub fn fast_read<L: Link>(chip: &mut Clrc663<L>, first: u8, last: u8) -> Result<Vec<u8>> {
+pub fn fast_read<R: Reader>(chip: &mut R, first: u8, last: u8) -> Result<Vec<u8>> {
     let expected = (last - first + 1) as usize * 4;
     // 80 ms rather than 50: 504 bytes at 106 kbit/s is ~43 ms of radio alone, and 7 ms of margin
     // made for intermittent failures depending on how the tag sat on the antenna.
@@ -105,7 +104,7 @@ pub fn fast_read<L: Link>(chip: &mut Clrc663<L>, first: u8, last: u8) -> Result<
 /// A full FAST_READ costs ~130 ms, most of a 200 ms poll. The first READ's 16 bytes carry the TLV
 /// header and so the message's length, and an address fits in those 16 or the next — so a pad tag
 /// is read in one or two short exchanges, and only a long message pays for the whole memory.
-pub fn read_ndef_area<L: Link>(chip: &mut Clrc663<L>) -> Result<Vec<u8>> {
+pub fn read_ndef_area<R: Reader>(chip: &mut R) -> Result<Vec<u8>> {
     let mut data = read_pages(chip, PAGE_USER_START)?;
     let Some(needed) = crate::ndef::tlv_size(&data) else {
         return fast_read(chip, PAGE_USER_START, PAGE_USER_END);

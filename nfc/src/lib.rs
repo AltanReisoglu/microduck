@@ -13,8 +13,11 @@
 pub mod clrc663;
 pub mod ndef;
 pub mod pairing;
+pub mod reader;
 pub mod registers;
 pub mod serial;
+pub mod spi;
+pub mod st25r100;
 pub mod tag;
 pub mod transport;
 
@@ -25,7 +28,7 @@ pub enum Error {
     Io(std::io::Error),
     /// The link answered, but not in step with what was sent. Recovered by a soft reset.
     Desync(String),
-    /// Something answered that is not a CLRC66303. Distinct from no answer at all: the wiring is
+    /// Something answered that is not the chip this driver speaks. Distinct from no answer at all: the wiring is
     /// fine, the silicon is not what this driver speaks — or the port is some other device.
     WrongChip(u8),
     /// No tag in the field. The ordinary answer, five times a second.
@@ -48,9 +51,9 @@ impl std::fmt::Display for Error {
         match self {
             Self::Io(e) => write!(f, "{e}"),
             Self::Desync(why) => write!(f, "serial link out of step: {why}"),
-            Self::WrongChip(version) => write!(
+            Self::WrongChip(id) => write!(
                 f,
-                "something answered with version 0x{version:02X}, not a CLRC66303 (0x{:02X})",
+                "something answered with identity 0x{id:02X}: not a CLRC66303 (0x{:02X}) nor an ST25R100 (0xA8-0xAF)",
                 registers::VERSION_CLRC663
             ),
             Self::NoTag => write!(f, "no tag"),
