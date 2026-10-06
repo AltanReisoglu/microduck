@@ -105,15 +105,11 @@ const RECORD: usize = 7;
 const GYRO_RAD_PER_LSB: f32 = 0.0175 * std::f32::consts::PI / 180.0;
 const ACCEL_MS2_PER_LSB: f32 = 0.000122 * 9.806_65;
 
-/// The chip's sensor→head mount on the beta's face board: +90° about X, so the head frame is
-/// `x` forward, `y` left, `z` up with the head level — `[x, −z, y]` of the sensor's. Read off a
-/// beta with its head straight (2026-10-06): the chip's `+y` pointed up.
-pub const MOUNT: [f32; 4] = [
-    std::f32::consts::FRAC_1_SQRT_2,
-    std::f32::consts::FRAC_1_SQRT_2,
-    0.0,
-    0.0,
-];
+/// The chip's sensor→head mount on the beta's face board, so the head frame is `x` forward, `y`
+/// left, `z` up with the head level: head = `[−z, −x, +y]` of the sensor's. +90° about X, then
+/// −90° about Z. Found on a beta (2026-10-06): standing straight the chip's `+y` pointed up,
+/// and a nod — pitch — then read as roll until the second turn put its `−z` forward.
+pub const MOUNT: [f32; 4] = [0.5, 0.5, -0.5, -0.5];
 
 /// Rotate `v` by the unit quaternion `q` (scalar-first).
 fn rotate(q: [f32; 4], v: [f32; 3]) -> [f32; 3] {
@@ -511,15 +507,19 @@ mod tests {
         let samples = decode(&burst, &mut last);
         assert_eq!(samples.len(), 1);
         let s = samples[0];
-        // Sensor x is head x: 0x06f1 = 1777 LSB * 17.5 mdps = 31.1 dps = 0.543 rad/s.
-        assert!((s.gyro[0] - 0.5428).abs() < 1e-3, "{:?}", s.gyro);
+        // Sensor x is head -y: 0x06f1 = 1777 LSB * 17.5 mdps = 31.1 dps = 0.543 rad/s.
+        assert!((s.gyro[1] + 0.5428).abs() < 1e-3, "{:?}", s.gyro);
         // Sensor y is head z: 0x1414 = 5140 LSB * 0.122 mg = 0.627 g = 6.15 m/s².
         assert!((s.accel[2] - 6.150).abs() < 1e-2, "{:?}", s.accel);
-        // The chip read ~92.6° about its x with the head level; in head axes that is ~2.6°.
+        // With the head level the world's up, seen from the head, is +z within a few degrees.
+        // (Yaw is a game vector's own and arbitrary, so only the tilt is checked.)
         let [w, x, y, z] = s.quat;
         let norm = (w * w + x * x + y * y + z * z).sqrt();
         assert!((norm - 1.0).abs() < 1e-3, "unit quaternion, got {norm}");
-        let tilt = 2.0 * w.abs().min(1.0).acos().to_degrees();
+        let tilt = (1.0 - 2.0 * (x * x + y * y))
+            .clamp(-1.0, 1.0)
+            .acos()
+            .to_degrees();
         assert!(
             tilt < 4.0,
             "a level head reads near-identity, got {tilt}° ({:?})",
@@ -533,15 +533,15 @@ mod tests {
         let mut last = ([1.0, 2.0, 3.0], [4.0, 5.0, 6.0]);
         let burst = record(TAG_SFLP_GAME, [0, 0, 0, 0, 0, 0]);
         let samples = decode(&burst, &mut last);
-        // [x, y, z] of the sensor is [x, -z, y] of the head.
+        // [x, y, z] of the sensor is [-z, -x, y] of the head.
         let close = |a: [f32; 3], b: [f32; 3]| a.iter().zip(b).all(|(p, q)| (p - q).abs() < 1e-5);
         assert!(
-            close(samples[0].gyro, [1.0, -3.0, 2.0]),
+            close(samples[0].gyro, [-3.0, -1.0, 2.0]),
             "{:?}",
             samples[0].gyro
         );
         assert!(
-            close(samples[0].accel, [4.0, -6.0, 5.0]),
+            close(samples[0].accel, [-6.0, -4.0, 5.0]),
             "{:?}",
             samples[0].accel
         );
@@ -555,8 +555,7 @@ mod tests {
         assert!(decode(&burst, &mut last).is_empty());
     }
 
-    /// The mount itself: gravity along the chip's +y (how it sits on a level head) is +z in the
-    /// head frame, and the chip's x stays forward.
+    /// The mount itself: the chip's +y (up on a level head) is head +z, and its -z is forward.
     #[test]
     fn the_mount_puts_the_chips_y_up() {
         let up = to_head([0.0; 3], [0.0, 9.8, 0.0], [1.0, 0.0, 0.0, 0.0]).accel;
@@ -564,7 +563,7 @@ mod tests {
             (up[2] - 9.8).abs() < 1e-4 && up[0].abs() < 1e-4 && up[1].abs() < 1e-4,
             "{up:?}"
         );
-        let fwd = to_head([1.0, 0.0, 0.0], [0.0; 3], [1.0, 0.0, 0.0, 0.0]).gyro;
+        let fwd = to_head([0.0, 0.0, -1.0], [0.0; 3], [1.0, 0.0, 0.0, 0.0]).gyro;
         assert!((fwd[0] - 1.0).abs() < 1e-5, "{fwd:?}");
     }
 
