@@ -468,6 +468,79 @@ impl MediaSource {
     }
 }
 
+/// A head camera sensor this project builds robots with — the substring its driver puts in the
+/// media graph's entity name (`m00_b_gc2093 2-0037`).
+///
+/// Which one a robot has is its board's ([`board::Board::camera_sensor`]), unless `[media] sensor`
+/// forces another. `mediad` keeps one profile per variant, matched exhaustively, so a sensor added
+/// here does not build until it has one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CameraSensor {
+    /// Sony's, on the Zero 3W robots.
+    Imx219,
+    /// GalaxyCore's, on the beta board.
+    Gc2093,
+}
+
+impl CameraSensor {
+    /// The name this sensor has in the file and in the media graph.
+    pub fn label(self) -> &'static str {
+        match self {
+            CameraSensor::Imx219 => "imx219",
+            CameraSensor::Gc2093 => "gc2093",
+        }
+    }
+}
+
+/// Which sensor the head camera must be: the board's, or one forced by name.
+///
+/// **`board` is the default and the normal case.** A camera and its board go together, so a
+/// robot whose media graph holds another sensor is refused — that is a robot assembled with the
+/// wrong module, or one declaring the wrong board. Naming a sensor here is for the exception: a
+/// board fitted with another camera on purpose, on a bench.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MediaSensor {
+    #[default]
+    Board,
+    Imx219,
+    Gc2093,
+}
+
+/// Every choice, in the order an editor cycles them — and the strings the file uses.
+/// [`tests::every_media_sensor_label_round_trips`] pins it to the enum in both directions.
+pub const MEDIA_SENSOR_LABELS: &[&str] = &["board", "imx219", "gc2093"];
+
+impl MediaSensor {
+    /// The choices, in [`MEDIA_SENSOR_LABELS`] order.
+    pub const ALL: [MediaSensor; 3] =
+        [MediaSensor::Board, MediaSensor::Imx219, MediaSensor::Gc2093];
+
+    /// The name this choice has in the file.
+    pub fn label(self) -> &'static str {
+        match self {
+            MediaSensor::Board => "board",
+            MediaSensor::Imx219 => "imx219",
+            MediaSensor::Gc2093 => "gc2093",
+        }
+    }
+
+    /// The sensor a forced choice names, or `None` for `board`.
+    pub fn forced(self) -> Option<CameraSensor> {
+        match self {
+            MediaSensor::Board => None,
+            MediaSensor::Imx219 => Some(CameraSensor::Imx219),
+            MediaSensor::Gc2093 => Some(CameraSensor::Gc2093),
+        }
+    }
+
+    /// The sensor the head camera must be on `board`.
+    pub fn resolve(self, board: board::Board) -> CameraSensor {
+        self.forced().unwrap_or_else(|| board.camera_sensor())
+    }
+}
+
 /// What a test pattern runs at, whatever `[media] quality` says — width, height, frames a second.
 ///
 /// **A test pattern is not video anybody watches.** It exists so a board with no camera still has
@@ -527,6 +600,9 @@ pub struct MediaParams {
     /// [`CameraIntrinsics`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub intrinsics: Option<CameraIntrinsics>,
+    /// Which sensor the head camera must be. `board`, the default, is the declared board's — see
+    /// [`MediaSensor`] for why anything else is the exception.
+    pub sensor: MediaSensor,
 }
 
 /// A camera calibration, as OpenCV's `calibrateCamera` produces one.
@@ -603,6 +679,8 @@ impl Default for MediaParams {
             // to is a fact about a plugin we ship from a pinned release, and the day it changes
             // should not be the day every robot's send rate changes with it.
             congestion_control: CongestionControl::default(),
+            // The board's camera: a sensor named here is a deliberate exception.
+            sensor: MediaSensor::Board,
         }
     }
 }
@@ -3202,6 +3280,44 @@ mod tests {
                 toml::from_str(&format!("[media]\nsource = \"{label}\"\n")).expect("parses");
             assert_eq!(parsed.media.source, source);
         }
+    }
+
+    #[test]
+    fn every_media_sensor_label_round_trips() {
+        assert_eq!(MEDIA_SENSOR_LABELS.len(), MediaSensor::ALL.len());
+        for (label, sensor) in MEDIA_SENSOR_LABELS.iter().zip(MediaSensor::ALL) {
+            assert_eq!(*label, sensor.label());
+            let parsed: Params =
+                toml::from_str(&format!("[media]\nsensor = \"{label}\"\n")).expect("parses");
+            assert_eq!(parsed.media.sensor, sensor);
+            if let Some(forced) = sensor.forced() {
+                assert_eq!(
+                    forced.label(),
+                    *label,
+                    "a forced choice is the sensor's own name"
+                );
+            }
+        }
+    }
+
+    /// The board decides unless a sensor is named, and an unset key is `board`.
+    #[test]
+    fn the_head_camera_is_the_boards_unless_forced() {
+        use board::Board;
+        let unset: Params = toml::from_str("").unwrap();
+        assert_eq!(unset.media.sensor, MediaSensor::Board);
+        assert_eq!(
+            MediaSensor::Board.resolve(Board::Zero3),
+            CameraSensor::Imx219
+        );
+        assert_eq!(
+            MediaSensor::Board.resolve(Board::Beta),
+            CameraSensor::Gc2093
+        );
+        assert_eq!(
+            MediaSensor::Imx219.resolve(Board::Beta),
+            CameraSensor::Imx219
+        );
     }
 
     /// **The key that was replaced must not come back as a silent default.** A robot carrying the

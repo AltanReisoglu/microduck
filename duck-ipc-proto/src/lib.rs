@@ -424,12 +424,20 @@ pub const JSONRPC_VERSION: &str = "2.0";
 /// starts, including the one right after the update that brought v35 in. Both warned. The attempt
 /// tells them apart, and its error is what the warning was pointing at the journal for.
 ///
-/// # v38 — `robot.rest`
+/// # v38 — which servos are missing, while the bus is coming up
+///
+/// [`BusHealth::missing`]: the servo IDs that did not answer the last ping round while `robotd`
+/// waits for the bus. A robot with three servos unplugged reported "no robot on the motor bus",
+/// which is the wording for servo power being off, while the daemon's own log named the three.
+/// Additive: absent from an older `robotd`, and an empty list reads as "not told", which is what
+/// the old wording assumed anyway.
+///
+/// # v39 — `robot.rest`
 ///
 /// [`method::ROBOT_REST`]: `robot.shutdown`'s sit and rest pose, ending in torque off and a servo
 /// reboot instead of a power-off. The pad's held Select, released before the power-off threshold.
 /// A new route: a `robotd` predating it answers METHOD_NOT_FOUND, by name.
-pub const API_VERSION: u32 = 38;
+pub const API_VERSION: u32 = 39;
 
 /// The observation width every policy this robot family runs is built against.
 ///
@@ -542,6 +550,26 @@ pub const JOINT_NAMES: [&str; 15] = [
     "right_knee",
     "right_ankle",
 ];
+
+/// Each joint's Dynamixel ID, indexed as [`JOINT_NAMES`].
+///
+/// Protocol for the same reason the names are: [`BusHealth::missing`] carries IDs, because the ID
+/// is what is printed on the servo a person has to go and find, and a client has to be able to
+/// say which joint that is. `duck-control` re-exports it, so the IDs the bus is driven with and
+/// the ones a client names are one table.
+pub const JOINT_IDS: [u8; 15] = [
+    20, 21, 22, 23, 24, // left leg
+    30, 31, 32, 33, 34, // neck, head, mouth
+    10, 11, 12, 13, 14, // right leg
+];
+
+/// The joint a Dynamixel ID drives, if it is one of [`JOINT_IDS`].
+pub fn joint_of(id: u8) -> Option<&'static str> {
+    JOINT_IDS
+        .iter()
+        .position(|&known| known == id)
+        .map(|index| JOINT_NAMES[index])
+}
 
 /// Method names, as they go on the wire. Namespaced so a new namespace cannot collide
 /// with `update.*`. [`Call`] is the typed form.
@@ -3543,7 +3571,7 @@ pub struct LoopHealth {
 /// `#[serde(default)]` for the reason spelled out on [`ImuHealth`], and it applies here even more
 /// plainly: these are failure counters whose zero the doc comments below already call meaningful.
 /// An older `robotd` that omits one is saying "no failures", not "unknown".
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BusHealth {
     /// Consecutive failed reads; any success resets it. One is ordinary on a serial bus,
@@ -3553,6 +3581,32 @@ pub struct BusHealth {
     /// commanded anything and is still waiting for a robot to answer — the signature of
     /// servo power being off.
     pub startup_failures: u32,
+    /// While waiting: the expected servo IDs ([`JOINT_IDS`]) that did not answer the last ping
+    /// round, in that table's order. Empty once the bus is up, before the first round, and when
+    /// the port itself would not open. All fifteen is servo power off; some of them is servos
+    /// unplugged, and naming them is the point.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub missing: Vec<u8>,
+}
+
+impl BusHealth {
+    /// Whether some servos answer and these do not — a robot that is there, with parts of it
+    /// missing, as opposed to no robot at all.
+    pub fn partly_missing(&self) -> bool {
+        !self.missing.is_empty() && self.missing.len() < JOINT_IDS.len()
+    }
+
+    /// The missing servos as people read them: `32 head_yaw, 33 head_roll`.
+    pub fn describe_missing(&self) -> String {
+        self.missing
+            .iter()
+            .map(|&id| match joint_of(id) {
+                Some(joint) => format!("{id} {joint}"),
+                None => id.to_string(),
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
 }
 
 /// The IMU board, which rides the motor bus.

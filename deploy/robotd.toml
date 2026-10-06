@@ -510,6 +510,14 @@ mode = "walk"
 # gcc is webrtcsink's own default, so this line changes nothing; it is here to be found.
 # congestion_control = "gcc"
 
+# Which sensor the head camera must be: board, imx219 or gc2093.
+#
+# `board` follows the declared board — imx219 on a zero3, gc2093 on a beta — and mediad refuses a
+# camera that is not that one, because a camera and its board go together: a mismatch is a robot
+# assembled with the wrong module, or one declaring the wrong board. Naming a sensor forces it,
+# for a board fitted with another camera on purpose. Not something a normal robot sets.
+# sensor = "board"
+
 # ── Controller-IMU head control ─────────────────────────────────────────────────────────────
 #
 # Read by `padd`, not by `robotd`. Some pads carry an inertial unit — the "Pro Controller" Switch

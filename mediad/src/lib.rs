@@ -27,6 +27,9 @@ pub mod producer;
 /// own LAN. `docs/design/remote-access-design.md` §3.
 pub mod relay;
 pub mod route;
+/// Which camera sensor the robot has, found in the media graph, and the units and optics that go
+/// with it.
+pub mod sensor;
 pub mod session;
 mod snapshot;
 pub mod stream;

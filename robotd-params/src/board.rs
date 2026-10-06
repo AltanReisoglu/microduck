@@ -63,6 +63,17 @@ impl Board {
         }
     }
 
+    /// The head camera sensor this board is built with.
+    ///
+    /// A camera and its board go together: `mediad` refuses a media graph holding another sensor,
+    /// unless `[media] sensor` forces one ([`crate::MediaSensor`]).
+    pub fn camera_sensor(self) -> crate::CameraSensor {
+        match self {
+            Board::Zero3 => crate::CameraSensor::Imx219,
+            Board::Beta => crate::CameraSensor::Gc2093,
+        }
+    }
+
     /// The last release this board gets, or `None` while it is supported.
     ///
     /// **Setting this is how a board is retired, and it is the only step.** From the release that
