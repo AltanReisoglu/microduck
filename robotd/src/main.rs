@@ -1926,6 +1926,9 @@ async fn control_loop<T: RobotIo>(
     // The sit-then-power-off sequence: the policy sits, then `shutdown_rest` eases the joints
     // into the rest pose before torque is cut.
     let mut shutdown_sit: Option<Instant> = None;
+    // Whether the sequence under way ends in a power-off (`robot.shutdown`, an empty pack) or limp
+    // with the servos rebooted (`robot.rest`). Both sit and ease into the rest pose first.
+    let mut shutdown_power_off = true;
     let mut shutdown_rest: Option<RestRamp> = None;
     // What the previous tick commanded, which is where the rest ramp starts.
     let mut last_targets = DEFAULT_POSITION;
@@ -2232,6 +2235,12 @@ async fn control_loop<T: RobotIo>(
             }
             bringup = Bringup::Limp;
             was_driving = false;
+            // A rest ends here: its sit and rest pose are done with.
+            if !shutdown_power_off {
+                shutdown_sit = None;
+                shutdown_rest = None;
+                shutdown_power_off = true;
+            }
             // As for a relax: the robot came back limp, and the seat or move it had is gone.
             if let Some(controller) = controller.as_mut() {
                 controller.forget();
@@ -2548,7 +2557,39 @@ async fn control_loop<T: RobotIo>(
         let battery_empty = params.safety.battery_empty_shutdown
             && battery_v > 0.0
             && battery_v <= duck_control::model::BATTERY_EMPTY_V;
-        if !powered_off && shutdown_sit.is_none() && (intents.take_shutdown() || battery_empty) {
+        //
+        // `robot.rest` runs the same sit and rest pose and ends limp, servos rebooted, instead of
+        // powered off. A power-off asked for during a rest stays latched and runs once the rest
+        // has ended — on a limp robot, so straight to the power-off.
+        let (shutdown, rest) = if !powered_off && shutdown_sit.is_none() {
+            (
+                intents.take_shutdown() || battery_empty,
+                intents.take_rest(),
+            )
+        } else {
+            (false, false)
+        };
+        if !shutdown && rest {
+            let can_sit = snapshot.enabled
+                && bringup == Bringup::Ready
+                && !safety.fallen()
+                && controller.as_ref().is_some_and(|c| c.has_sitstand());
+            if can_sit {
+                tracing::warn!("rest: sitting down, then easing into the rest pose");
+                controller
+                    .as_mut()
+                    .expect("can_sit checked the controller")
+                    .begin_shutdown_sit();
+                shutdown_sit = Some(tick_start);
+                shutdown_power_off = false;
+            } else {
+                // Nothing driving to sit with: what is left of a rest is its end.
+                tracing::warn!("rest: the robot cannot sit — torque off and servo reboot now");
+                intents.request_reboot_motors(Vec::new());
+            }
+        }
+        if shutdown {
+            shutdown_power_off = true;
             let can_sit = snapshot.enabled
                 && bringup == Bringup::Ready
                 && !safety.fallen()
@@ -2592,6 +2633,16 @@ async fn control_loop<T: RobotIo>(
                         gain: safety.gain().unwrap_or(policy_cfg.gain),
                         since: tick_start,
                     });
+                }
+                Some(rest) if rest.done(tick_start) && !shutdown_power_off => {
+                    // The rest's end: the servo reboot cuts torque on every joint and leaves the
+                    // robot limp — and forgets the seat — on the next tick. Held at the rest pose
+                    // until then, which is where the ramp just put it.
+                    tracing::warn!("at rest: torque off and servo reboot");
+                    intents.request_reboot_motors(Vec::new());
+                    // The rest stays in place, holding the rest pose, until the reboot above
+                    // takes it on the next tick and ends it: cleared here, the policy would have
+                    // the robot for the tick in between.
                 }
                 Some(rest) if rest.done(tick_start) => {
                     tracing::warn!("at rest: cutting torque and powering off");
@@ -4980,6 +5031,13 @@ fn dispatch(
             proto::Response::ok(Some(id), &proto::IntentResult::accepted())
         }
 
+        // Never refused, like the shutdown it is the first half of: the loop decides whether the
+        // robot can sit first or is rebooted where it is.
+        proto::Call::RobotRest => {
+            intents.request_rest();
+            proto::Response::ok(Some(id), &proto::IntentResult::accepted())
+        }
+
         // Never refused: a robot with a tripped servo is exactly the one that needs it.
         proto::Call::RobotRebootMotors(p) => {
             intents.request_reboot_motors(p.ids.clone());
@@ -6311,6 +6369,48 @@ mod tests {
             powered.load(Ordering::Relaxed),
             "poweroff must have been asked for"
         );
+    }
+
+    /// `robot.rest` on a robot that cannot sit (no policy driving) is what is left of a rest: a
+    /// servo reboot, every servo, here and now — and no power-off. The sit-first path needs a
+    /// policy and therefore ONNX Runtime, so it is exercised on a board rather than here.
+    #[tokio::test]
+    async fn a_rest_request_without_a_sit_reboots_every_servo() {
+        let io = FakeIo::at(DEFAULT_POSITION);
+        let mut params = Params::default();
+        params.policy.enabled = false;
+        let s = Arc::new(RobotState::new(
+            &params,
+            std::path::Path::new("/test/robotd.toml"),
+            false,
+            false,
+        ));
+        let intents = Arc::new(Intents::new());
+        intents.request_rest();
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let loop_state = Arc::clone(&s);
+        let loop_intents = Arc::clone(&intents);
+        let handle = tokio::spawn(async move {
+            let mut io = io;
+            control_loop_probe_with(&mut io, loop_state, loop_intents, Duration::from_millis(2))
+                .await;
+            tx.send((io.reboots.clone(), io.torque)).unwrap();
+        });
+
+        while s.ticks.load(Ordering::Relaxed) < 10 {
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        s.shutdown.store(true, Ordering::Relaxed);
+        handle.await.unwrap();
+
+        let (reboots, torque) = rx.recv().unwrap();
+        assert_eq!(
+            reboots.len(),
+            duck_control::model::JOINT_IDS.len(),
+            "every servo rebooted: {reboots:?}"
+        );
+        assert_eq!(torque, Some(false), "and left limp");
     }
 
     /// **Nothing powers the joints again after the poweroff has been asked for.**

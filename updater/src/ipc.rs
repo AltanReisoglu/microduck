@@ -788,6 +788,7 @@ impl Server {
             | Call::RobotInit
             | Call::RobotRelax
             | Call::RobotRebootMotors(_)
+            | Call::RobotRest
             | Call::RobotDo(_)
             | Call::RobotSound(_)
             | Call::RobotPose(_)

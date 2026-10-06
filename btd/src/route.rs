@@ -448,6 +448,11 @@ fn permits(call: &proto::Call) -> bool {
         // means whoever tapped it is looking at the robot.
         RobotRebootMotors(_) => true,
 
+        // A rest ends where a servo reboot does — limp — and gets there more gently: sat down
+        // and eased into the rest pose first when the robot is driving. Permitted on
+        // `rebootMotors`' argument; it is `relax`'s unannounced drop it avoids, not its outcome.
+        RobotRest => true,
+
         // **`relax` stays refused, and the asymmetry is the point.** Standing up is controlled:
         // the joints go where they are told. Relaxing is a robot that was holding itself up and
         // now is not, which on a phone is a button whose failure mode is the floor, and its

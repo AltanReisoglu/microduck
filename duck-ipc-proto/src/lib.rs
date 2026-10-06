@@ -423,7 +423,13 @@ pub const JSONRPC_VERSION: &str = "2.0";
 /// an `updaterd` that has not run its first check yet — every board for the minute after it
 /// starts, including the one right after the update that brought v35 in. Both warned. The attempt
 /// tells them apart, and its error is what the warning was pointing at the journal for.
-pub const API_VERSION: u32 = 37;
+///
+/// # v38 — `robot.rest`
+///
+/// [`method::ROBOT_REST`]: `robot.shutdown`'s sit and rest pose, ending in torque off and a servo
+/// reboot instead of a power-off. The pad's held Select, released before the power-off threshold.
+/// A new route: a `robotd` predating it answers METHOD_NOT_FOUND, by name.
+pub const API_VERSION: u32 = 38;
 
 /// The observation width every policy this robot family runs is built against.
 ///
@@ -634,6 +640,12 @@ pub mod method {
     /// Torque is cut on every joint first and the robot is back at limp afterwards, so `robot.init`
     /// or `robot.enable` brings it up from a known state. Discrete; send as a request.
     pub const ROBOT_REBOOT_MOTORS: &str = "robot.rebootMotors";
+
+    /// Put the robot down for a rest: [`ROBOT_SHUTDOWN`]'s sequence without the power-off. A
+    /// driving robot sits with the sitstand policy, eases into the rest pose, then has torque cut
+    /// and every servo rebooted ([`ROBOT_REBOOT_MOTORS`]); a robot that cannot sit is rebooted
+    /// where it is. Ends limp, ready for `robot.init`. Discrete; send as a request.
+    pub const ROBOT_REST: &str = "robot.rest";
 
     // ── skills ───────────────────────────────────────────────────────────────
     //
@@ -1000,6 +1012,8 @@ pub enum Call {
     RobotRelax,
     /// Reboot servos (all of them, or the ids named), then limp. See [`method::ROBOT_REBOOT_MOTORS`].
     RobotRebootMotors(RebootMotorsParams),
+    /// Sit, ease into the rest pose, then torque off and reboot. See [`method::ROBOT_REST`].
+    RobotRest,
     /// Run a one-shot skill, or toggle sit↔stand.
     RobotDo(DoParams),
     /// Standing body pose. Continuous. Send as a notification.
@@ -1182,6 +1196,7 @@ impl Call {
             Call::RobotInit => method::ROBOT_INIT,
             Call::RobotRelax => method::ROBOT_RELAX,
             Call::RobotRebootMotors(_) => method::ROBOT_REBOOT_MOTORS,
+            Call::RobotRest => method::ROBOT_REST,
             Call::RobotDo(_) => method::ROBOT_DO,
             Call::RobotPose(_) => method::ROBOT_POSE,
             Call::RobotMouth(_) => method::ROBOT_MOUTH,
@@ -1365,6 +1380,7 @@ impl Call {
             | Call::RobotInit
             | Call::RobotRelax
             | Call::RobotRebootMotors(_)
+            | Call::RobotRest
             | Call::RobotDo(_)
             | Call::RobotPose(_)
             | Call::RobotMouth(_)
@@ -1510,6 +1526,7 @@ impl Call {
             | Call::RobotStop
             | Call::RobotInit
             | Call::RobotRelax
+            | Call::RobotRest
             | Call::RobotShutdown
             | Call::RobotPolicies
             | Call::RobotModel
@@ -1571,6 +1588,7 @@ impl Call {
             method::ROBOT_INIT => Call::RobotInit,
             method::ROBOT_RELAX => Call::RobotRelax,
             method::ROBOT_REBOOT_MOTORS => Call::RobotRebootMotors(decode(params)?),
+            method::ROBOT_REST => Call::RobotRest,
             method::ROBOT_DO => Call::RobotDo(decode(params)?),
             method::ROBOT_POSE => Call::RobotPose(decode(params)?),
             method::ROBOT_MOUTH => Call::RobotMouth(decode(params)?),
@@ -1724,6 +1742,7 @@ pub mod test_support {
             Call::RobotInit,
             Call::RobotRelax,
             Call::RobotRebootMotors(RebootMotorsParams { ids: vec![3, 11] }),
+            Call::RobotRest,
             Call::RobotDo(DoParams {
                 skill: "ground_pick".into(),
             }),
@@ -5567,7 +5586,7 @@ mod tests {
     fn every_call_covers_every_variant() {
         assert_eq!(
             every_call().len(),
-            67,
+            68,
             "a Call variant was added or removed — update every_call() and this count"
         );
     }

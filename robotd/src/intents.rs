@@ -75,7 +75,8 @@ impl Default for PoseIntent {
 pub struct SkillRequests {
     /// Phase-scripted, and still its own thing until the descriptor grows a command generator.
     pub ground_pick: bool,
-    /// Latched, and driven internally by the shutdown sit as well as by a button, which is why it is not one of the configurable one-shots either.
+    /// Latched, and driven internally by the shutdown sit as well as by a button, which is why it
+    /// is not one of the configurable one-shots either.
     pub sit_toggle: bool,
     /// The configurable one-shots, as a mask over the resolved skill list.
     ///
@@ -173,6 +174,8 @@ pub struct Intents {
     skills: std::sync::atomic::AtomicU32,
     /// A shutdown was requested. A level, not an edge: once asked, the sequence runs.
     shutdown: AtomicBool,
+    /// A rest was requested: the shutdown's sit and rest pose, ending limp instead of powered off.
+    rest: AtomicBool,
     /// A drive-mode switch was requested, and which mode to switch to.
     ///
     /// An `AtomicU8` holding [`MODE_NONE`] or a mode's code, for the same reason `shutdown` is a
@@ -281,6 +284,7 @@ impl Intents {
             chorale_heard: std::sync::Mutex::new(Vec::new()),
             skills: std::sync::atomic::AtomicU32::new(0),
             shutdown: AtomicBool::new(false),
+            rest: AtomicBool::new(false),
             mode_switch: AtomicU8::new(MODE_NONE),
             policy_change: ArcSwapOption::empty(),
             sounds: std::sync::atomic::AtomicU32::new(0),
@@ -448,6 +452,16 @@ impl Intents {
     /// Take a pending shutdown request. Taken rather than read so the sequence starts once.
     pub fn take_shutdown(&self) -> bool {
         self.shutdown.swap(false, Ordering::Relaxed)
+    }
+
+    /// Ask for a rest — see `robot.rest`.
+    pub fn request_rest(&self) {
+        self.rest.store(true, Ordering::Relaxed);
+    }
+
+    /// Take a pending rest request, once, like [`Self::take_shutdown`].
+    pub fn take_rest(&self) -> bool {
+        self.rest.swap(false, Ordering::Relaxed)
     }
 
     pub fn set_enabled(&self, on: bool) {

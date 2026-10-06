@@ -36,8 +36,8 @@
 //! D-pad down      body + head — left stick crouches and leans sideways, right stick looks around
 //! Start           first press stands up, then toggles the policy
 //! Start, 1.5 s    home pose, motors stiff, policy off — a seated robot stays seated
-//! Select, 2 s     torque off and reboot every servo
-//! Select, 4 s     power off, where it lies
+//! Select, 2–4 s   let go: sit, rest pose, then torque off and every servo rebooted
+//! Select, 4 s     sit, rest pose, then power off
 //! ```
 //!
 //! The D-pad *selects* a mode rather than toggling one, so a press always lands where its arrow
@@ -189,12 +189,14 @@ const IDLE_POLL: Duration = Duration::from_millis(500);
 /// never reaches it, short enough to be the obvious thing to do when the robot is somewhere odd.
 const HOME_HOLD: Duration = Duration::from_millis(1500);
 
-/// Select held this long cuts torque and reboots every servo — the robot drops, so hold it.
-const RELAX_HOLD: Duration = Duration::from_secs(2);
+/// Select let go after this long, and before [`SHUTDOWN_HOLD`], puts the robot down for a rest:
+/// `robot.rest` — it sits if it is driving, eases into the rest pose, then torque goes off and
+/// every servo reboots. Decided on the release, because until then the hold may still become a
+/// power-off, and both start the same way.
+const REST_HOLD: Duration = Duration::from_secs(2);
 
-/// Select held this long powers the robot off. The hold has crossed [`RELAX_HOLD`] on the way, so
-/// the robot is already limp and powers off where it lies rather than sitting first — `robotd`'s
-/// shutdown skips the sit on a robot that is not driving.
+/// Select held this long powers the robot off: `robot.shutdown`, the same sit and rest pose ending
+/// in a power-off. Sent the moment the hold gets here; the release after it does nothing.
 const SHUTDOWN_HOLD: Duration = Duration::from_secs(4);
 
 /// A button that does different things depending on how long it is held.
@@ -222,6 +224,9 @@ enum HoldAction {
     Tap,
     /// The hold just crossed this threshold, by index.
     Reached(usize),
+    /// Let go after a hold whose furthest threshold was this one, by index. For a button whose
+    /// action depends on where the hold stopped, which is only known at the release.
+    ReleasedAfter(usize),
 }
 
 impl HoldButton {
@@ -247,12 +252,17 @@ impl HoldButton {
             }
             return HoldAction::Nothing;
         }
-        let acted = self.fired > 0 || self.spent;
+        let was_held = released || self.held_since.is_some();
+        let (fired, spent) = (self.fired, self.spent);
         *self = Self::default();
-        if released && !acted {
-            return HoldAction::Tap;
+        match (fired, spent) {
+            // The tail of a hold cut by a dropout says nothing — see `reset`.
+            (_, true) => HoldAction::Nothing,
+            (0, false) if released => HoldAction::Tap,
+            (0, false) => HoldAction::Nothing,
+            (n, false) if was_held => HoldAction::ReleasedAfter(n - 1),
+            (_, false) => HoldAction::Nothing,
         }
-        HoldAction::Nothing
     }
 
     /// Forget a hold in flight. Called when the pad goes away: the hold's start was measured
@@ -462,7 +472,7 @@ fn main() -> std::process::ExitCode {
         roller,
         "driving — A sit, B ground pick, LB/RB kicks, triggers mouth; D-pad up head, \
          right head + move, left move, down body + head; Start stands up then toggles the policy, \
-         Start (1.5s) home pose; Select (2s) torque off + servo reboot, Select (4s) power off"
+         Start (1.5s) home pose; Select (2-4s) rest, Select (4s) power off"
     );
 
     let period = Duration::from_secs_f64(1.0 / args.hz as f64);
@@ -637,7 +647,8 @@ fn main() -> std::process::ExitCode {
             tick,
             &[HOME_HOLD],
         ) {
-            HoldAction::Nothing => {}
+            // Start's one threshold acts when it is reached; its release says nothing more.
+            HoldAction::Nothing | HoldAction::ReleasedAfter(_) => {}
             HoldAction::Reached(_) => go_home = true,
             HoldAction::Tap if !up => {
                 tracing::warn!("Start — robot.init: standing up. Press Start again to drive");
@@ -782,34 +793,35 @@ fn main() -> std::process::ExitCode {
             return std::process::ExitCode::FAILURE;
         }
 
-        // Select: nothing on a tap, torque off at two seconds, power off at four. Both are
-        // sent once per hold, and the release after them does nothing. The robot owns the
-        // shutdown sequence from there.
+        // Select: nothing on a tap. Let go between two and four seconds, a rest; held to four, a
+        // power-off. Both sit and ease into the rest pose before torque goes, which is why the
+        // rest waits for the release: until then the same hold may still become a power-off.
         match select.tick(
             pad.is_pressed(Button::Select),
             select_released,
             tick,
-            &[RELAX_HOLD, SHUTDOWN_HOLD],
+            &[REST_HOLD, SHUTDOWN_HOLD],
         ) {
-            HoldAction::Nothing => {}
-            HoldAction::Tap => {
-                tracing::info!("Select tapped — hold it 2 s to cut torque, 4 s to power off")
-            }
-            HoldAction::Reached(0) => {
+            HoldAction::ReleasedAfter(0) => {
                 tracing::warn!(
-                    "Select held — robot.rebootMotors: torque off and reboot every servo"
+                    "Select released — robot.rest: sit, rest pose, then torque off and servo reboot"
                 );
-                // A reboot rather than a bare relax: torque goes off first either way, and a
-                // servo that tripped its overload comes back with it — so the button that stops
-                // the robot is also the way out of a tripped servo without pulling the battery.
-                // The robot is left limp, so the next Start stands it up again rather than
-                // toggling the policy on a robot that is lying on the floor.
+                // A reboot at the end rather than a bare relax: a servo that tripped its overload
+                // comes back with it, so this is also the way out of a tripped servo without
+                // pulling the battery. The robot ends limp, so the next Start stands it up again
+                // rather than toggling the policy on a robot that is lying on the floor.
                 up = false;
-                let call = proto::Call::RobotRebootMotors(proto::RebootMotorsParams::default());
-                if let Err(e) = request(&mut stream, &mut next_id, &call) {
-                    tracing::error!(error = %e, "reboot request failed");
+                if let Err(e) = request(&mut stream, &mut next_id, &proto::Call::RobotRest) {
+                    tracing::error!(error = %e, "rest request failed");
                     return std::process::ExitCode::FAILURE;
                 }
+            }
+            HoldAction::Nothing | HoldAction::ReleasedAfter(_) => {}
+            HoldAction::Tap => {
+                tracing::info!("Select tapped — hold it 2 s to rest, 4 s to power off")
+            }
+            HoldAction::Reached(0) => {
+                tracing::warn!("Select held 2 s — let go to rest, keep holding to power off")
             }
             HoldAction::Reached(_) => {
                 up = false;
@@ -1402,85 +1414,40 @@ mod tests {
         assert!((head.head_yaw - 0.5).abs() < 1e-6, "{head:?}");
     }
 
-    const SELECT: [Duration; 2] = [RELAX_HOLD, SHUTDOWN_HOLD];
+    const SELECT: [Duration; 2] = [REST_HOLD, SHUTDOWN_HOLD];
     const START: [Duration; 1] = [HOME_HOLD];
 
-    /// Select: a tap does nothing to the robot, two seconds cuts torque, four powers off. Each
-    /// fires once, in order, and the release after either is silent.
+    /// Select: a tap does nothing to the robot. Let go between two and four seconds, a rest —
+    /// decided at the release, since the hold could still have become a power-off. Held to four,
+    /// the power-off goes out at four, and its release adds nothing.
     #[test]
-    fn select_cuts_torque_at_two_seconds_and_powers_off_at_four() {
+    fn select_rests_on_a_release_between_two_and_four_and_powers_off_at_four() {
         let t0 = Instant::now();
         let at = |ms: u64| t0 + Duration::from_millis(ms);
         let mut select = HoldButton::default();
+        let mut tick = |pressed, released, ms| select.tick(pressed, released, at(ms), &SELECT);
 
-        // A tap: down for 300 ms, then up. Reported, so the log can say what a hold would do.
-        assert_eq!(
-            select.tick(true, false, at(0), &SELECT),
-            HoldAction::Nothing
-        );
-        assert_eq!(
-            select.tick(true, false, at(300), &SELECT),
-            HoldAction::Nothing
-        );
-        assert_eq!(select.tick(false, true, at(320), &SELECT), HoldAction::Tap);
+        // A tap: reported, so the log can say what a hold would do.
+        assert_eq!(tick(true, false, 0), HoldAction::Nothing);
+        assert_eq!(tick(false, true, 300), HoldAction::Tap);
 
-        // Released at 1.9 s: still only a tap — nothing cut torque.
-        assert_eq!(
-            select.tick(true, false, at(1_000), &SELECT),
-            HoldAction::Nothing
-        );
-        assert_eq!(
-            select.tick(true, false, at(2_900), &SELECT),
-            HoldAction::Nothing
-        );
-        assert_eq!(
-            select.tick(false, true, at(2_920), &SELECT),
-            HoldAction::Tap
-        );
+        // Let go at 1.9 s: still a tap.
+        assert_eq!(tick(true, false, 1_000), HoldAction::Nothing);
+        assert_eq!(tick(false, true, 2_900), HoldAction::Tap);
 
-        // Held through: torque off at 2 s, power off at 4 s, once each, and a silent release.
-        assert_eq!(
-            select.tick(true, false, at(10_000), &SELECT),
-            HoldAction::Nothing
-        );
-        assert_eq!(
-            select.tick(true, false, at(11_990), &SELECT),
-            HoldAction::Nothing
-        );
-        assert_eq!(
-            select.tick(true, false, at(12_000), &SELECT),
-            HoldAction::Reached(0)
-        );
-        assert_eq!(
-            select.tick(true, false, at(12_020), &SELECT),
-            HoldAction::Nothing
-        );
-        assert_eq!(
-            select.tick(true, false, at(14_000), &SELECT),
-            HoldAction::Reached(1)
-        );
-        assert_eq!(
-            select.tick(true, false, at(14_020), &SELECT),
-            HoldAction::Nothing
-        );
-        assert_eq!(
-            select.tick(false, true, at(15_000), &SELECT),
-            HoldAction::Nothing
-        );
+        // Let go at 3 s: two seconds reached, four not — a rest, at the release only.
+        assert_eq!(tick(true, false, 10_000), HoldAction::Nothing);
+        assert_eq!(tick(true, false, 12_000), HoldAction::Reached(0));
+        assert_eq!(tick(true, false, 12_500), HoldAction::Nothing);
+        assert_eq!(tick(false, true, 13_000), HoldAction::ReleasedAfter(0));
+        assert_eq!(tick(false, false, 13_020), HoldAction::Nothing);
 
-        // Let go between the two: torque is off, the robot stays powered, the release is silent.
-        assert_eq!(
-            select.tick(true, false, at(20_000), &SELECT),
-            HoldAction::Nothing
-        );
-        assert_eq!(
-            select.tick(true, false, at(22_000), &SELECT),
-            HoldAction::Reached(0)
-        );
-        assert_eq!(
-            select.tick(false, true, at(23_000), &SELECT),
-            HoldAction::Nothing
-        );
+        // Held to four: the power-off at four, once, and a release that is not a rest.
+        assert_eq!(tick(true, false, 20_000), HoldAction::Nothing);
+        assert_eq!(tick(true, false, 22_000), HoldAction::Reached(0));
+        assert_eq!(tick(true, false, 24_000), HoldAction::Reached(1));
+        assert_eq!(tick(true, false, 24_020), HoldAction::Nothing);
+        assert_eq!(tick(false, true, 25_000), HoldAction::ReleasedAfter(1));
     }
 
     /// Start: a tap is the stand-up / policy toggle, a 1.5 s hold is the way home — and a hold
@@ -1515,7 +1482,8 @@ mod tests {
         );
         assert_eq!(
             start.tick(false, true, at(9_020), &START),
-            HoldAction::Nothing
+            HoldAction::ReleasedAfter(0),
+            "reported, and Start acts on nothing at its release"
         );
     }
 
@@ -1533,7 +1501,7 @@ mod tests {
             select.tick(
                 true,
                 false,
-                t0 + RELAX_HOLD + Duration::from_secs(1),
+                t0 + REST_HOLD + Duration::from_secs(1),
                 &SELECT
             ),
             HoldAction::Nothing,
@@ -1548,7 +1516,7 @@ mod tests {
             stale.tick(
                 true,
                 false,
-                t0 + RELAX_HOLD + Duration::from_secs(1),
+                t0 + REST_HOLD + Duration::from_secs(1),
                 &SELECT
             ),
             HoldAction::Reached(0)
@@ -1563,13 +1531,13 @@ mod tests {
         let mut select = HoldButton::default();
         assert_eq!(select.tick(true, false, t0, &SELECT), HoldAction::Nothing);
         assert_eq!(
-            select.tick(true, false, t0 + RELAX_HOLD, &SELECT),
+            select.tick(true, false, t0 + REST_HOLD, &SELECT),
             HoldAction::Reached(0)
         );
 
         // Pad gone, pad back with Select still down for longer than the whole sequence.
         select.reset();
-        let back = t0 + RELAX_HOLD + Duration::from_secs(3);
+        let back = t0 + REST_HOLD + Duration::from_secs(3);
         assert_eq!(select.tick(true, false, back, &SELECT), HoldAction::Nothing);
         assert_eq!(
             select.tick(true, false, back + SHUTDOWN_HOLD, &SELECT),
@@ -1586,7 +1554,7 @@ mod tests {
         let t1 = back + Duration::from_secs(10);
         assert_eq!(select.tick(true, false, t1, &SELECT), HoldAction::Nothing);
         assert_eq!(
-            select.tick(true, false, t1 + RELAX_HOLD, &SELECT),
+            select.tick(true, false, t1 + REST_HOLD, &SELECT),
             HoldAction::Reached(0)
         );
     }
