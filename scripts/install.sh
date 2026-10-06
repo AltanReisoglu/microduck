@@ -99,6 +99,10 @@ TOKEN="${DUCK_TOKEN:-}"
 # `robotctl rollback` for that reason. Ordinary updates keep the gate.
 FORCE_REINSTALL="${DUCK_FORCE_REINSTALL:-}"
 
+# Which electronic board this is, written to robotd.toml's `[board] version`. Empty leaves the
+# file alone, which is a zero3 unless it already says otherwise. `provision-board.sh --board`.
+BOARD="${DUCK_BOARD:-}"
+
 # Trust the team dev key on this board, so `robotctl update apply --ref <branch>` works.
 #
 #   sudo DUCK_TOKEN=... DUCK_DEV_KEY=/path/to/team.dev.pub sh install.sh
@@ -304,6 +308,7 @@ install_config() {
         fetch "${config_raw}/deploy/robotd.toml" "${CONFIG_DIR}/robotd.toml"
         chmod 644 "${CONFIG_DIR}/robotd.toml"
     fi
+    declare_board
 }
 
 # Land the first release through the real engine. `--config` is the config installed
@@ -1029,7 +1034,37 @@ install_token_dropin() {
   robot you ship. It is why artifact hosting is still open — docs/design/updater-design.md §6.1."
 }
 
+# Refuse a board name robotd would refuse, before anything is downloaded: an unknown value in
+# `[board] version` is a type error, and a robotd that will not parse its file does not start.
+# The names are `robotd_params::board::BOARD_LABELS`.
+check_board_name() {
+    case "$BOARD" in
+        ""|zero3|beta) ;;
+        *) die "DUCK_BOARD=${BOARD} is not a board: zero3 or beta" ;;
+    esac
+}
+
+# Write the board into robotd.toml, whatever state the file is in: just fetched from a release
+# whose template has a commented `[board]`, fetched from one that predates the section, or kept
+# from an earlier install. `version` is the only key of that name in the file, so it is matched
+# on its own, commented or not.
+declare_board() {
+    [ -n "$BOARD" ] || return 0
+    file="${CONFIG_DIR}/robotd.toml"
+    if grep -Eq '^#? *version = "' "$file"; then
+        sed -i -E "s|^#? *version = \".*\"|version = \"${BOARD}\"|" "$file"
+    elif grep -q '^\[board\]' "$file"; then
+        awk -v board="$BOARD" '{ print } /^\[board\]$/ { print "version = \"" board "\"" }' \
+            "$file" > "${file}.new"
+        mv "${file}.new" "$file"
+    else
+        printf '\n[board]\nversion = "%s"\n' "$BOARD" >> "$file"
+    fi
+    say "declared this board a ${BOARD} in ${file}"
+}
+
 main() {
+    check_board_name
     check_environment
     check_board
     wait_for_clock

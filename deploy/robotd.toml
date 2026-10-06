@@ -15,6 +15,14 @@
 # unprovisioned board comes up on these same numbers rather than refusing to start, which
 # is far easier to diagnose remotely than a daemon that will not run.
 
+[board]
+# Which electronic board this robot is built on: "zero3" (the Radxa Zero 3W with the prototype's
+# HAT) or "beta" (the custom board). Set when the robot is provisioned — `provision-board.sh
+# --board` — and not something to change on a robot that works. The updater reads it for the
+# hardware revision a release is checked against, so declaring the wrong board can cost a robot
+# its updates; `robotctl health` says when this and the device tree disagree.
+# version = "zero3"
+
 [bus]
 # Serial port the 15 servos and the imu_to_dxl board share. /dev/ttyS2 is the Radxa
 # Zero 3W's wiring; a board wired differently can also be overridden per-invocation with
