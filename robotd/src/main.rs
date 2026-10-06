@@ -22,6 +22,7 @@ mod chorale;
 mod control;
 mod head_imu;
 mod intents;
+mod leds;
 mod params;
 mod pickup;
 mod posture;
@@ -577,6 +578,13 @@ struct RobotState {
     imu_stale_run: AtomicU64,
     imu_ready: AtomicBool,
     shutdown: AtomicBool,
+    /// What `robot.flashlight` last asked for, as [`leds::Flashlight`] stores it.
+    flashlight: AtomicU8,
+    /// Whether this board has a flashlight, so `robot.flashlight` refuses on one that does not
+    /// rather than accepting into the dark. Read once: an LED does not appear on a running board.
+    has_flashlight: bool,
+    /// Wakes the LED task now, rather than at its next second — a flashlight press, the shutdown.
+    leds_changed: tokio::sync::Notify,
     /// Fan-out for `robot.state`. Bounded and lossy by design — see [`STATE_BUFFER`].
     state_tx: tokio::sync::broadcast::Sender<proto::RobotState>,
     /// What `btd` should be advertising, published when it changes.
@@ -722,6 +730,9 @@ impl RobotState {
             imu_stale_run: AtomicU64::new(0),
             imu_ready: AtomicBool::new(false),
             shutdown: AtomicBool::new(false),
+            flashlight: AtomicU8::new(0),
+            has_flashlight: leds::flashlight_fitted(),
+            leds_changed: tokio::sync::Notify::new(),
             state_tx: tokio::sync::broadcast::Sender::new(STATE_BUFFER),
             chorale_tx: tokio::sync::broadcast::Sender::new(8),
             head_imu_tx: tokio::sync::broadcast::Sender::new(head_imu::FRAME_BUFFER),
@@ -1063,6 +1074,8 @@ async fn main() -> ExitCode {
         }
     };
 
+    let leds = tokio::spawn(leds::run(Arc::clone(&state)));
+
     let serving = serve(
         Arc::clone(&state),
         Arc::clone(&intents),
@@ -1083,7 +1096,10 @@ async fn main() -> ExitCode {
     // Ask the loop to stop and let it finish the tick it is in, rather than aborting
     // mid-transaction and leaving a half-written packet on the bus.
     state.shutdown.store(true, Ordering::Relaxed);
+    state.leds_changed.notify_one();
     let _ = control.join();
+    // Bounded: an LED write that hangs on the expander must not hold the daemon up.
+    let _ = tokio::time::timeout(Duration::from_secs(1), leds).await;
     let _ = std::fs::remove_file(&args.socket);
     code
 }
@@ -4987,6 +5003,21 @@ fn dispatch(
             proto::Response::ok(Some(id), &result)
         }
 
+        // The task that owns the LED switches it; this only records what was asked and wakes it.
+        proto::Call::RobotFlashlight(p) => {
+            let result = if state.has_flashlight {
+                let current = state.flashlight.load(Ordering::Relaxed);
+                state
+                    .flashlight
+                    .store(leds::flashlight_after(current, p), Ordering::Relaxed);
+                state.leds_changed.notify_one();
+                proto::IntentResult::accepted()
+            } else {
+                proto::IntentResult::refused("this board has no flashlight")
+            };
+            proto::Response::ok(Some(id), &result)
+        }
+
         // Sit, then power the machine off. Never refused for being inconvenient — a robot
         // that cannot sit (no sitstand policy, not driving) cuts torque and powers off
         // directly, which is still what was asked for.
@@ -6351,6 +6382,34 @@ mod tests {
             ],
             "the answer must be exactly what the head was sent"
         );
+    }
+
+    /// A board without a flashlight says so; one with it records the toggle for the LED task.
+    #[test]
+    fn robot_flashlight_is_refused_without_one_and_toggles_with_one() {
+        let intents = Intents::new();
+        let toggle = proto::Call::RobotFlashlight(proto::FlashlightParams {
+            toggle: true,
+            ..Default::default()
+        });
+        let ask = |s: &RobotState| -> proto::IntentResult {
+            dispatch(s, &intents, proto::Id::Number(1), &toggle)
+                .result_as()
+                .unwrap()
+        };
+
+        let mut s = state();
+        s.has_flashlight = false;
+        let refused = ask(&s);
+        assert!(!refused.accepted);
+        assert!(refused.reason.is_some(), "a refusal must say why");
+        assert_eq!(s.flashlight.load(Ordering::Relaxed), 0);
+
+        s.has_flashlight = true;
+        assert!(ask(&s).accepted);
+        assert_ne!(s.flashlight.load(Ordering::Relaxed), 0);
+        assert!(ask(&s).accepted);
+        assert_eq!(s.flashlight.load(Ordering::Relaxed), 0);
     }
 
     /// `robotctl quack` exists to answer "which duck am I talking to", and it answers by

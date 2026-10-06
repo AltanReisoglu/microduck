@@ -174,6 +174,17 @@ enum Namespace {
     /// its own — is the one you're SSH'd into.
     Quack,
 
+    /// Switch the flashlight — the beta face's RGB LED. `robotd` owns it, so this asks rather than
+    /// writing the LED (`robotctl led` is the bench tool that writes it directly).
+    Flashlight {
+        /// `on`, `off` or `toggle`.
+        #[arg(value_parser = ["on", "off", "toggle"])]
+        state: String,
+        /// white, red, green, blue, yellow, cyan or magenta.
+        #[arg(long, default_value = "white")]
+        color: String,
+    },
+
     /// Sing with other ducks: two in a room start a piece between themselves, and more join.
     ///
     /// Starts *listening* — the robot goes on the air saying it is willing and watches for others.
@@ -602,6 +613,34 @@ fn run_quack(socket: &Path) -> Result<(), Failure> {
         return Err(Failure::new(exit::REFUSED, reason));
     }
     println!("🦆");
+    Ok(())
+}
+
+/// `robotctl flashlight` — ask `robotd` to switch the flashlight.
+fn run_flashlight(socket: &Path, state: &str, color: &str) -> Result<(), Failure> {
+    let color: proto::FlashlightColor =
+        serde_json::from_value(serde_json::Value::String(color.to_owned())).map_err(|_| {
+            Failure::new(
+                exit::USAGE,
+                format!("{color:?} is not white, red, green, blue, yellow, cyan or magenta"),
+            )
+        })?;
+    let mut client = Client::connect_to("robotd", socket)?;
+    client.hello()?;
+    let result = result_of(client.call(&proto::Call::RobotFlashlight(
+        proto::FlashlightParams {
+            on: state == "on",
+            toggle: state == "toggle",
+            color,
+        },
+    ))?)?;
+    let outcome: proto::IntentResult = decode(&result)?;
+    if !outcome.accepted {
+        let reason = outcome
+            .reason
+            .unwrap_or_else(|| "the robot refused".to_owned());
+        return Err(Failure::new(exit::REFUSED, reason));
+    }
     Ok(())
 }
 
@@ -5285,6 +5324,9 @@ fn run(cli: Cli) -> Result<(), Failure> {
         }
         Namespace::Quack => {
             return run_quack(&cli.robot_socket);
+        }
+        Namespace::Flashlight { state, color } => {
+            return run_flashlight(&cli.robot_socket, &state, &color);
         }
         Namespace::HeadImu => {
             return run_head_imu(&cli.robot_socket);

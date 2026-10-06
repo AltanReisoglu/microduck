@@ -442,7 +442,7 @@ fn main() -> ExitCode {
         // `get_frame` surface in `architecture.md` §5.3 is what the rest of it is for. The branch
         // runs from the start rather than being added later, because a tee inserted into a live
         // pipeline is a different and much harder problem than a tee that was always there.
-        let (_pipeline, mut channels, frames, stream_branch) = match mediad::pipeline::start(
+        let (_pipeline, mut channels, frames, stream_branch, peers) = match mediad::pipeline::start(
             source.clone(),
             &producer,
             &settings,
@@ -630,6 +630,13 @@ fn main() -> ExitCode {
             rotate,
             &args.token,
         ));
+
+        // The camera LED, for as long as the pipeline lives. A crashed mediad leaves it as it was;
+        // `ExecStopPost` in the unit switches it off.
+        {
+            let streamer = std::sync::Arc::clone(&streamer);
+            tokio::spawn(mediad::indicator::run(peers, move || streamer.is_streaming()));
+        }
 
         let media = mediad::session::Media {
             video: video.clone(),
