@@ -2123,8 +2123,13 @@ async fn control_loop<T: RobotIo>(
     let mut chorale_mouth = 0.0f64;
     // And how the head sways while singing, applied to the next tick's command.
     let mut chorale_head = [0.0f64; 4];
-    // The head looking around while nothing is happening — see `idle_head`.
-    let mut idle_head = idle_head::IdleHead::default();
+    // The robot looking around while nothing is happening — see `idle_head`. Seeded from the
+    // clock, so two robots side by side do not glance in step.
+    let mut idle_head = idle_head::IdleHead::new(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(1, |d| d.as_nanos() as u64),
+    );
 
     // The note the theremin is holding, kept across ticks so a hand leaving the frame fades
     // the note at its own pitch instead of gliding to the bottom of the range on its way out.
@@ -2956,7 +2961,20 @@ async fn control_loop<T: RobotIo>(
             && snapshot.head_age >= idle_head::IDLE_AFTER
             && chorale_head.iter().all(|v| v.abs() < 1e-3)
             && controller.as_ref().is_some_and(|c| !c.busy());
-        let idle_offset = idle_head.tick(tick_start, still, period);
+        let idle = idle_head.tick(tick_start, still, period);
+        // The breath moves the body pose, which only the standing network is trained on — and
+        // only while no client holds the body pose itself.
+        let breath = if !snapshot.pose.active
+            && controller
+                .as_ref()
+                .and_then(|c| c.driving())
+                .is_some_and(|d| d == control::Driving::Stand)
+        {
+            idle.body_z
+        } else {
+            0.0
+        };
+        let idle_offset = idle.head;
         let command = PolicyCommand {
             twist: twist_ema,
             // The chorale's sway rides on top of whatever the head was asked to do, computed
@@ -2970,7 +2988,7 @@ async fn control_loop<T: RobotIo>(
                 head_ema[3] + chorale_head[3] + idle_offset[3],
             ],
             body: BodyPose {
-                z: body_ema[0],
+                z: body_ema[0] + breath,
                 roll: body_ema[1],
                 pitch: body_ema[2],
             },
