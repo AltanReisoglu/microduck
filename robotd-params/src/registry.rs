@@ -467,6 +467,11 @@ pub const REGISTRY: &[Entry] = &[
         Kind::Choice(crate::CONGESTION_LABELS),
         "Adapt the send rate to the link — disabled costs adaptivity and saves a core's worth",
     ),
+    entry(
+        "media.sensor",
+        Kind::Choice(crate::MEDIA_SENSOR_LABELS),
+        "Head camera sensor — board follows the declared board; naming one forces it",
+    ),
     // ── [pad] ────────────────────────────────────────────────────────────────
     //
     // Which button runs which skill. Read by `padd`, not by `robotd` — but it lives in the same

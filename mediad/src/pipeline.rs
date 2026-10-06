@@ -230,6 +230,9 @@ pub struct Camera {
     pub device: String,
     pub exposure: Option<u32>,
     pub analogue_gain: Option<u32>,
+    /// The sensor this camera must be — the board's, unless `[media] sensor` forces one. A media
+    /// graph holding another is refused; [`crate::sensor`] says why.
+    pub expected: crate::sensor::Expected,
 }
 
 impl Camera {
@@ -1321,7 +1324,7 @@ fn make(name: &str) -> Result<gst::Element> {
 /// layout, and the frame loss has a cause with a small fix — see [`raise_capture_buffers`].
 #[cfg(target_os = "linux")]
 fn camera_source(camera: &Camera, fps: u32) -> Result<gst::Element> {
-    let sensor = pin_sensor_mode(fps)?;
+    let sensor = pin_sensor_mode(camera.expected, fps)?;
     let (exposure, analogue_gain) = camera.starting(sensor);
 
     // Exposure and gain go through `extra-controls` rather than a `v4l2-ctl` call, so they are
@@ -1346,7 +1349,7 @@ fn camera_source(camera: &Camera, fps: u32) -> Result<gst::Element> {
 
     tracing::info!(
         device = %camera.device,
-        sensor = sensor.name,
+        sensor = sensor.name(),
         exposure,
         analogue_gain,
         "head camera"
@@ -1619,9 +1622,21 @@ pub fn pinned_sensor() -> Option<&'static crate::sensor::Sensor> {
 /// be discovered from the topology rather than named. Doing it here rather than in the unit means
 /// a run with `[media] camera` off needs no camera at all.
 #[cfg(target_os = "linux")]
-fn pin_sensor_mode(fps: u32) -> Result<&'static crate::sensor::Sensor> {
-    let (media, entity, sensor) = find_sensor()?;
+fn pin_sensor_mode(
+    expected: crate::sensor::Expected,
+    fps: u32,
+) -> Result<&'static crate::sensor::Sensor> {
+    let (media, entity, sensor) = find_sensor(expected)?;
     let mode = sensor.mode;
+
+    if expected.why == crate::sensor::Why::Forced {
+        // Said at warn because it is the exception: whatever the board is, this sensor is what
+        // somebody asked for, and a robot running on a forced camera should say so in every log.
+        tracing::warn!(
+            sensor = sensor.name(),
+            "`[media] sensor` forces this camera rather than the board's"
+        );
+    }
 
     let format = format!(
         "\"{entity}\":0[fmt:{}/{}x{}]",
@@ -1637,7 +1652,7 @@ fn pin_sensor_mode(fps: u32) -> Result<&'static crate::sensor::Sensor> {
         // Not fatal: capture still works, just slower. Said loudly because a third of the frames
         // going missing looks like a network problem from the far end.
         tracing::warn!(
-            %media, %entity, sensor = sensor.name,
+            %media, %entity, sensor = sensor.name(),
             why = %String::from_utf8_lossy(&output.stderr).trim(),
             "media-ctl would not set the {}x{} sensor mode — capture stays in the boot mode, \
              which on the IMX219 caps it at 21 fps, and `media.video` publishes no camera \
@@ -1647,7 +1662,7 @@ fn pin_sensor_mode(fps: u32) -> Result<&'static crate::sensor::Sensor> {
         );
     } else {
         tracing::info!(
-            %media, %entity, sensor = sensor.name, target_fps = fps,
+            %media, %entity, sensor = sensor.name(), target_fps = fps,
             "sensor mode {}x{}", mode.width, mode.height
         );
     }
@@ -1659,16 +1674,21 @@ fn pin_sensor_mode(fps: u32) -> Result<&'static crate::sensor::Sensor> {
 ///
 /// Matched on a substring rather than a fixed name: the entity is `m00_b_imx219 2-0010`, which
 /// embeds the I2C bus and address, and those move with the overlay. Which substrings count is
-/// [`crate::sensor::SENSORS`].
+/// [`crate::sensor::SENSORS`], and which one is accepted is `expected`: every graph is read
+/// before choosing, so a board with two cameras picks its own rather than the first it meets.
 ///
 /// **Every way this fails says which one it was.** An earlier version returned `Option` and
 /// reported "no imx219 entity" for all of them, which sent the first real run chasing the
-/// overlay when the actual cause was `media-ctl` being denied `/dev/media0`. The three cases want
-/// three different fixes and look identical from the outside.
+/// overlay when the actual cause was `media-ctl` being denied `/dev/media0`. The cases want
+/// different fixes and look identical from the outside.
 #[cfg(target_os = "linux")]
-fn find_sensor() -> Result<(String, String, &'static crate::sensor::Sensor)> {
+fn find_sensor(
+    expected: crate::sensor::Expected,
+) -> Result<(String, String, &'static crate::sensor::Sensor)> {
     let mut nodes = 0;
     let mut failures = Vec::new();
+    // Every sensor found, with the media device it is on.
+    let mut ours: Vec<(String, String, &'static crate::sensor::Sensor)> = Vec::new();
     let mut others = Vec::new();
 
     for index in 0..8 {
@@ -1695,10 +1715,38 @@ fn find_sensor() -> Result<(String, String, &'static crate::sensor::Sensor)> {
         }
 
         let topology = crate::sensor::Topology::read(&String::from_utf8_lossy(&output.stdout));
-        if let Some((entity, sensor)) = topology.ours {
-            return Ok((media, entity, sensor));
-        }
+        ours.extend(
+            topology
+                .ours
+                .into_iter()
+                .map(|(entity, sensor)| (media.clone(), entity, sensor)),
+        );
         others.extend(topology.others);
+    }
+
+    // A sensor in the graph, right or wrong, is the answer: the refusal for the wrong one names
+    // what is there and what was expected, which is more use than a complaint about the nodes.
+    if !ours.is_empty() || !others.is_empty() {
+        let found: Vec<_> = ours
+            .iter()
+            .map(|(_, entity, sensor)| (entity.clone(), *sensor))
+            .collect();
+        return match expected.pick(&found, &others) {
+            Ok((entity, sensor)) => {
+                let media = ours
+                    .into_iter()
+                    .find(|(_, e, _)| *e == entity)
+                    .map(|(media, _, _)| media)
+                    .expect("picked from this list");
+                Ok((media, entity, sensor))
+            }
+            Err(why) if found.is_empty() => bail!(
+                "{why}. This daemon has a profile for {}; another sensor needs an entry in \
+                 mediad::sensor, with its control units and caps.",
+                crate::sensor::known()
+            ),
+            Err(why) => bail!("{why}"),
+        };
     }
 
     if nodes == 0 {
@@ -1716,14 +1764,6 @@ fn find_sensor() -> Result<(String, String, &'static crate::sensor::Sensor)> {
              like. The unit grants it with SupplementaryGroups=, which `sudo -u` does not apply — \
              use `systemctl` or `systemd-run -p SupplementaryGroups=video`.",
             failures.join("\n  ")
-        );
-    }
-    if !others.is_empty() {
-        bail!(
-            "found a camera sensor this daemon has no profile for: {}. The ones it can drive are \
-             {}; another needs an entry in mediad::sensor, with its control units and caps.",
-            others.join(", "),
-            crate::sensor::known()
         );
     }
     bail!(

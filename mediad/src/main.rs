@@ -246,6 +246,14 @@ fn main() -> ExitCode {
         .clone()
         .unwrap_or_else(mediad::config::default_path);
     let params = mediad::config::load(&config, explicit);
+    // Which sensor the head camera must be: the board's, unless `[media] sensor` forces one.
+    // Whether the board was *declared* is read on its own, because an unset key parses as zero3
+    // and the refusal on a beta that never declared itself should say that, not "wrong camera".
+    let expected = mediad::sensor::Expected::new(
+        params.media.sensor,
+        params.board.version,
+        robotd_params::board::Board::declared(&config).is_some(),
+    );
     let (media, detect) = (params.media, params.duck_detector);
 
     // **What will actually run, not what is configured.** `[media] quality` is the rung a camera
@@ -405,6 +413,7 @@ fn main() -> ExitCode {
                         device: args.camera_device.clone(),
                         exposure: args.exposure,
                         analogue_gain: args.analogue_gain,
+                        expected,
                     })
                 }
                 robotd_params::MediaSource::Test => mediad::pipeline::Source::Test,
