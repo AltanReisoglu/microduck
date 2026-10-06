@@ -34,12 +34,15 @@ Type=exec
 # no further, which is the correct two-tier split (§2.2) — but provisioning is exactly what
 # BLE exists for, so btd is named here explicitly.
 #
+# `nfcd` for the same reason one call over: a touched tag sends `pad.pair`, which is mutating, and
+# the tag is the whole point of that daemon.
+#
 # By name rather than by uid: systemd-sysusers allocates dynamically, and a number that is
 # right on one board is wrong on the next.
 #
 # Note what is NOT here: nothing grants the `robot` group as a whole. Being able to talk to
 # configd and being able to reconfigure the robot stay separate.
-ExecStart=/opt/robot/daemon/current/bin/configd --allow-user btd
+ExecStart=/opt/robot/daemon/current/bin/configd --allow-user btd,nfcd
 
 # Root, and this is the one thing here that deserves justification rather than assumption.
 #
