@@ -23,17 +23,17 @@ use std::f64::consts::TAU;
 use std::time::{Duration, Instant};
 
 /// Still for this long before it starts to look around.
-pub const IDLE_AFTER: Duration = Duration::from_secs(5);
+pub const IDLE_AFTER: Duration = Duration::from_secs(2);
 
 /// How long the whole thing takes to fade in, and out.
 pub const FADE: Duration = Duration::from_millis(1500);
 
-/// How far a glance turns the head left or right at most, radians (~25°).
-const GLANCE_YAW: f64 = 0.45;
-/// How far a glance tips it up or down at most, radians (~8°).
-const GLANCE_PITCH: f64 = 0.15;
-/// The curious tilt, radians (~14°), and how often a glance comes with one.
-const TILT_ROLL: f64 = 0.25;
+/// How far a glance turns the head left or right at most, radians (~34°).
+const GLANCE_YAW: f64 = 0.6;
+/// How far a glance tips it up or down at most, radians (~11°).
+const GLANCE_PITCH: f64 = 0.2;
+/// The curious tilt, radians (~17°), and how often a glance comes with one.
+const TILT_ROLL: f64 = 0.3;
 const TILT_CHANCE: f64 = 0.2;
 /// How often a glance goes back to the middle rather than somewhere new.
 const CENTRE_CHANCE: f64 = 0.25;
@@ -46,7 +46,7 @@ const MOVE_MIN: f64 = 0.35;
 const MOVE_PER_RAD: f64 = 1.2;
 
 /// The drift that keeps a held glance alive, radians.
-const DRIFT: f64 = 0.03;
+const DRIFT: f64 = 0.04;
 /// The breath: metres of body height, and seconds per breath.
 const BREATH_Z: f64 = 0.001;
 const BREATH_PERIOD: f64 = 3.6;
@@ -273,7 +273,7 @@ mod tests {
     fn it_looks_around_only_after_the_robot_has_been_still() {
         let mut idle = IdleHead::new(7);
         let t0 = Instant::now();
-        let (now, early) = run(&mut idle, t0, 4.9, true);
+        let (now, early) = run(&mut idle, t0, IDLE_AFTER.as_secs_f64() - 0.1, true);
         assert!(early.iter().all(|o| *o == IdleOffset::default()), "not yet");
 
         let (_, later) = run(&mut idle, now, 60.0, true);
@@ -312,7 +312,7 @@ mod tests {
         let (now, faded) = run(&mut idle, now, FADE.as_secs_f64() + 0.1, false);
         assert_eq!(*faded.last().unwrap(), IdleOffset::default(), "gone");
 
-        let (_, again) = run(&mut idle, now, 4.0, true);
+        let (_, again) = run(&mut idle, now, IDLE_AFTER.as_secs_f64() - 0.2, true);
         assert!(
             again.iter().all(|o| *o == IdleOffset::default()),
             "the wait starts over"
@@ -324,7 +324,7 @@ mod tests {
     fn it_dozes_off() {
         let mut idle = IdleHead::new(11);
         let t0 = Instant::now();
-        let (now, _) = run(&mut idle, t0, 5.0, true);
+        let (now, _) = run(&mut idle, t0, IDLE_AFTER.as_secs_f64(), true);
         let glances = |idle: &mut IdleHead, from: Instant| {
             let mut count = 0;
             let mut last = None;

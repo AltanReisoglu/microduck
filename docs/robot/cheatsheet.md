@@ -573,7 +573,7 @@ if `padd` dies. **If the pad drops out while driving**, the robot asks where it 
 quack), and after a second sits down if it was standing — kicks and picks are let finish first.
 When the pad comes back it greets you with a quack; A stands the robot up.
 
-**Left alone, the robot looks around.** After 5 s with the policy running, no motion asked for
+**Left alone, the robot looks around.** After 2 s with the policy running, no motion asked for
 and nobody steering the head, it glances about every few seconds — mostly left and right, a
 little up and down, now and then with a curious tilt — holds each look, drifts very slightly
 while it does, and breathes (a millimetre of height, standing only). The longer nothing happens
