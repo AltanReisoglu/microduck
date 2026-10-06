@@ -3858,6 +3858,7 @@ version = "0.15.2"
 dependencies = [
  "duck-ipc-proto",
  "kinematics",
+ "semver",
  "serde",
  "serde_json",
  "tempfile",
@@ -5118,6 +5119,7 @@ dependencies = [
  "minisign",
  "minisign-verify",
  "reqwest",
+ "robotd-params",
  "semver",
  "serde",
  "serde_json",
