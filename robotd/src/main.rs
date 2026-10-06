@@ -8688,7 +8688,10 @@ mod tests {
         let near_end = to_seat
             .homing_target(since + HOME_RAMP - Duration::from_millis(1))
             .expect("still ramping");
-        assert!((near_end[3] - SEAT_POSITION[3]).abs() < 0.01, "{near_end:?}");
+        assert!(
+            (near_end[3] - SEAT_POSITION[3]).abs() < 0.01,
+            "{near_end:?}"
+        );
 
         // Neither other state ramps anything.
         assert!(Bringup::Limp.homing_target(since).is_none());
