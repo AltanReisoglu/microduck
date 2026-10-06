@@ -162,18 +162,6 @@ struct Args {
     #[arg(long, default_value_t = 0.1)]
     deadzone: f64,
 
-    /// Full-deflection forward/strafe speed, m/s. The prototype's alpha default.
-    #[arg(long, default_value_t = 0.3)]
-    max_linear: f64,
-
-    /// Full-deflection backward speed, m/s — the prototype caps reverse separately.
-    #[arg(long, default_value_t = 0.3)]
-    max_linear_backward: f64,
-
-    /// Full-deflection turn rate, rad/s.
-    #[arg(long, default_value_t = 1.5)]
-    max_angular: f64,
-
     /// Full-deflection head travel, radians. The head command feeds the policy's
     /// observation rather than a servo directly, so this is the prototype's generous 2.5 —
     /// the network itself decides how far the head actually goes.
@@ -342,7 +330,7 @@ fn mode_exit_calls(from: Mode, to: Mode) -> Vec<proto::Call> {
 /// How often to look for a rewritten config. See the loop.
 const BINDINGS_POLL: Duration = Duration::from_secs(1);
 
-/// The button bindings and the IMU head switch, or the defaults.
+/// The button bindings, the IMU head switch and the walking speeds, or the defaults.
 ///
 /// A file that will not parse is never a reason to leave somebody without a pad: the defaults
 /// are a working robot, and the reason is logged. That matters more here than elsewhere because
@@ -353,17 +341,21 @@ fn read_bindings(
 ) -> (
     robotd_params::PadParams,
     robotd_params::PadImuHeadControlParams,
+    robotd_params::PadDriveParams,
 ) {
     match robotd_params::Params::load(path, false) {
         Ok(params) => {
             let pad = params.pad;
             let imu_head = params.pad_imu_head_control;
+            let drive = params.pad_drive;
             tracing::info!(
                 a = %pad.a, b = %pad.b, x = %pad.x, y = %pad.y, lb = %pad.lb, rb = %pad.rb,
                 pad_imu_head_control = imu_head.enabled, pad_imu_head_gain = imu_head.gain,
+                vx = ?(drive.vx_min, drive.vx_max), vy = ?(drive.vy_min, drive.vy_max),
+                vyaw = ?(drive.vyaw_min, drive.vyaw_max),
                 "button bindings"
             );
-            (pad, imu_head)
+            (pad, imu_head, drive)
         }
         Err(e) => {
             tracing::warn!(
@@ -374,6 +366,7 @@ fn read_bindings(
             (
                 robotd_params::PadParams::default(),
                 robotd_params::PadImuHeadControlParams::default(),
+                robotd_params::PadDriveParams::default(),
             )
         }
     }
@@ -476,7 +469,7 @@ fn main() -> std::process::ExitCode {
     // The button bindings, read once like every other daemon reads its config. A file that will
     // not parse is not a reason to leave somebody without a pad: the default mapping is the
     // fallback, and the reason is logged.
-    let (mut bindings, mut imu_head_cfg) = read_bindings(&args.config);
+    let (mut bindings, mut imu_head_cfg, mut drive) = read_bindings(&args.config);
     // When the file was last written, so a change is picked up without a restart. `padd` holds
     // no motor control and no session state — the whole of it is this table — so re-reading is a
     // swap between two ticks rather than anything to sequence.
@@ -516,7 +509,7 @@ fn main() -> std::process::ExitCode {
             let now = config_mtime(&args.config);
             if now != bindings_at {
                 bindings_at = now;
-                (bindings, imu_head_cfg) = read_bindings(&args.config);
+                (bindings, imu_head_cfg, drive) = read_bindings(&args.config);
                 tracing::warn!("button bindings reloaded");
             }
             match ask_roller(&mut stream, &mut next_id) {
@@ -886,9 +879,7 @@ fn main() -> std::process::ExitCode {
 
         let limits = DriveLimits {
             roller,
-            max_linear: args.max_linear,
-            max_linear_backward: args.max_linear_backward,
-            max_angular: args.max_angular,
+            drive: &drive,
         };
 
         // This tick's continuous intents, as one frame. Reused rather than built fresh:
@@ -979,14 +970,13 @@ fn main() -> std::process::ExitCode {
 
 /// How full deflection maps to velocity, for the modes that walk.
 #[derive(Debug, Clone, Copy)]
-struct DriveLimits {
+struct DriveLimits<'a> {
     roller: bool,
-    max_linear: f64,
-    max_linear_backward: f64,
-    max_angular: f64,
+    /// `[pad_drive]`: each direction of each axis onto its own signed bound.
+    drive: &'a robotd_params::PadDriveParams,
 }
 
-impl DriveLimits {
+impl DriveLimits<'_> {
     /// A velocity from three stick axes: forward/back, strafe and turn. Which physical axis is
     /// which depends on the mode; the shaping does not.
     fn walk(&self, forward: f64, strafe: f64, turn: f64) -> proto::MoveParams {
@@ -1004,17 +994,14 @@ impl DriveLimits {
                 vyaw: -turn * ROLLER_YAW,
             };
         }
+        let scale = robotd_params::PadDriveParams::scale;
+        let d = self.drive;
         proto::MoveParams {
-            vx: forward
-                * if forward >= 0.0 {
-                    self.max_linear
-                } else {
-                    self.max_linear_backward
-                },
+            vx: scale(forward, d.vx_min, d.vx_max),
             // `vy` is positive to the left; stick-left reads negative on every pad gilrs
             // normalises.
-            vy: -strafe * self.max_linear,
-            vyaw: -turn * self.max_angular,
+            vy: scale(-strafe, d.vy_min, d.vy_max),
+            vyaw: scale(-turn, d.vyaw_min, d.vyaw_max),
         }
     }
 }
@@ -1647,11 +1634,13 @@ mod tests {
     /// it takes the roller shaping like every other walking mode.
     #[test]
     fn head_and_move_walks_and_turns_from_the_left_stick() {
+        let drive = robotd_params::PadDriveParams {
+            vx_min: -0.2,
+            ..Default::default()
+        };
         let walking = DriveLimits {
             roller: false,
-            max_linear: 0.3,
-            max_linear_backward: 0.2,
-            max_angular: 1.5,
+            drive: &drive,
         };
         // Left stick up and to the left: forward, turning left.
         let twist = walking.walk(1.0, 0.0, -1.0);
