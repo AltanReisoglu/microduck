@@ -28,16 +28,17 @@ use std::sync::Mutex;
 
 use duck_ipc_proto as proto;
 
-/// The rate the chip batches samples at, and so the rate frames are published at. 120 Hz is the
-/// SFLP's default output rate; gyro and accel are batched at the same rate so each quaternion
-/// comes with the gyro and accel sample it was computed alongside.
-pub const SAMPLE_HZ: u8 = 120;
+/// The rate the chip batches samples at, and so the rate frames are published at. The body IMU
+/// runs at the control loop's 50 Hz; the SFLP cannot (its rates are 15, 30, 60, 120, 240 and
+/// 480 Hz), so this is the nearest above it. Gyro and accel are batched at the same rate so each
+/// quaternion comes with the gyro and accel sample it was computed alongside.
+pub const SAMPLE_HZ: u8 = 60;
 
 /// How often the reader drains the FIFO. Four samples a wakeup at [`SAMPLE_HZ`].
-pub const WAKE_HZ: u32 = 30;
+pub const WAKE_HZ: u32 = 15;
 
 /// How far a subscriber may fall behind before it loses frames: ~2 s at [`SAMPLE_HZ`].
-pub const FRAME_BUFFER: usize = 256;
+pub const FRAME_BUFFER: usize = 128;
 
 /// The face board's IMU bus on the beta (`&i2c3` in rk3566-microduck-beta.dts), then the
 /// others, so a board revision that moves it is still found.
@@ -70,7 +71,11 @@ const FIFO_DATA_OUT_TAG: u8 = 0x78;
 // Embedded-functions bank, visible while FUNC_CFG_ACCESS bit 7 is set.
 const EMB_FUNC_EN_A: u8 = 0x04;
 const EMB_FUNC_FIFO_EN_A: u8 = 0x44;
+const SFLP_ODR: u8 = 0x5e;
 const EMB_FUNC_INIT_A: u8 = 0x66;
+/// SFLP_ODR[5:3]: 010 is 60 Hz (the default 011 is 120). The other bits are reserved and kept.
+const SFLP_ODR_MASK: u8 = 0b0011_1000;
+const SFLP_ODR_60HZ: u8 = 0b010 << 3;
 const SFLP_GAME_BIT: u8 = 1 << 1;
 
 const WHO_AM_I_VALUE: u8 = 0x70;
@@ -85,9 +90,9 @@ const CONFIG: &[(u8, u8)] = &[
     (CTRL6, 0x02),      // gyro ±500 dps
     (CTRL8, 0x41),      // accel ±4 g, LPF2 ODR/20
     (CTRL9, 0x08),      // LPF2_XL_EN
-    (CTRL1, 0x07),      // accel 240 Hz, high performance (SFLP needs the sensors >= its 120 Hz)
-    (CTRL2, 0x07),      // gyro  240 Hz, high performance
-    (FIFO_CTRL3, 0x66), // batch gyro and accel at 120 Hz
+    (CTRL1, 0x06),      // accel 120 Hz, high performance (SFLP needs the sensors >= its 60 Hz)
+    (CTRL2, 0x06),      // gyro  120 Hz, high performance
+    (FIFO_CTRL3, 0x55), // batch gyro and accel at 60 Hz
     (FIFO_CTRL4, 0x06), // continuous: the oldest records go if the reader falls behind
 ];
 
@@ -303,6 +308,8 @@ mod reader {
             }
             self.write(FUNC_CFG_ACCESS, 0x80)?;
             let sflp = (|| {
+                let odr = self.read1(SFLP_ODR)?;
+                self.write(SFLP_ODR, (odr & !SFLP_ODR_MASK) | SFLP_ODR_60HZ)?;
                 self.set_bits(EMB_FUNC_EN_A, SFLP_GAME_BIT)?;
                 self.set_bits(EMB_FUNC_FIFO_EN_A, SFLP_GAME_BIT)?;
                 self.set_bits(EMB_FUNC_INIT_A, SFLP_GAME_BIT)

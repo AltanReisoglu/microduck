@@ -429,8 +429,8 @@ mode = "walk"
 #   Reading it at 100 Hz costs ~3.5-4.5% of a core, almost all of it the two I²C transactions a
 #   sample takes (docs/project/tof-on-demand.md). `tofd --imu-hz 50` halves that.
 # - beta: the face board's LSM6DSV16X, read by robotd. **On.** The chip fuses the orientation
-#   itself and batches gyro, accel and quaternion in its FIFO, so 120 samples a second cost
-#   30 burst reads and no fusion.
+#   itself and batches gyro, accel and quaternion in its FIFO, so 60 samples a second cost
+#   15 burst reads and no fusion.
 #
 # Ask the daemon that does not read it on this board and the answer names the one that does.
 # While it is off, the answer names this key rather than giving the silence of a board with no

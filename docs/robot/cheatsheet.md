@@ -827,9 +827,9 @@ which daemon serves the stream, depends on the board:
 - **zero3**: `tofd` reads the HAT's BMI088 with a Madgwick fusion, **off by
   default**. It costs ~4% of a core at 100 Hz. `tofd --imu` reads it for one
   session without touching the file, and `--imu-hz` trades rate for cost.
-- **beta**: `robotd` reads the face board's LSM6DSV16X at 120 Hz, **on by
+- **beta**: `robotd` reads the face board's LSM6DSV16X at 60 Hz, **on by
   default**. The chip fuses the orientation itself and batches samples, so it
-  costs a burst read 30 times a second and no fusion on the CPU.
+  costs a burst read 15 times a second and no fusion on the CPU.
 
 `[head_imu] enabled` in `robotd.toml` overrides either default; `robotctl
 configure` offers the restart of whichever daemon reads it. Ask the other
