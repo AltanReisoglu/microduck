@@ -359,9 +359,9 @@ the analog triggers, which are the mouth and the quack. An empty name switches a
 `pad reset <button>` puts one back. X and Y ship empty, so they are the place for a new skill; X
 re-sends while held, which is what a chaining skill like the roulade wants.
 
-The rest of the pad is not bindable: Start stands the robot up and starts and stops the policy,
-the D-pad picks what the sticks mean, and held Select cuts torque and powers the robot off — the
-button that stops a robot is the one worth not being able to lose to a config edit. A name is checked against what the robot actually has, so a
+The rest of the pad is not bindable: Start stands the robot up and toggles the policy, the D-pad
+picks what the sticks mean, and held Select cuts torque and powers the robot off — the button that stops a robot is the one worth not
+being able to lose to a config edit. A name is checked against what the robot actually has, so a
 typo is refused with the list rather than becoming a dead button.
 
 #### Putting it all back
@@ -518,8 +518,7 @@ the thumb:
 | **D-pad up** | head mode: left stick head yaw and pitch, right stick neck pitch and head roll. The body holds still |
 | **D-pad right** | head + move: left stick forward/back and turn, right stick looks around (head yaw and pitch). With `[pad_imu_head_control] enabled` and a pad that has an IMU, the pad's tilt poses the head instead and the sticks keep the move mapping — see below |
 | **D-pad down** | body + head: left stick up/down rises and crouches, left/right leans the body sideways; right stick looks around (head yaw and pitch). The body does not walk |
-| **Start**, press | first press: torque on and a 2 s ramp — to the seat if the robot is sitting (or nearly), to the home pose otherwise. Second press: the robot is measured again — seated, it rises with the sitstand policy and then walks; anything else, the policy walks straight away. The journal says what it saw each time. After that a press starts the policy again — it never stops it |
-| **Start**, held 1 s | stops the policy: the robot returns to its home pose, motors stiff (a seated robot stays seated) |
+| **Start**, press | first press: torque on and a 2 s ramp — to the seat if the robot is sitting (or nearly), to the home pose otherwise. Second press: the robot is measured again — seated, it rises with the sitstand policy and then walks; anything else, the policy walks straight away. The journal says what it saw each time. After that a press toggles the policy: stopping it returns the robot to its home pose, stiff (a seated robot stays seated) |
 | **Start**, held 1.5 s | home pose, motors stiff, policy off — the "put everything back" button, from anywhere. Sitting, it stays seated, stiff: A stands it up after the next Start |
 | **Select**, held 2 s | torque off and every servo rebooted (`robot.rebootMotors`) — also the way back from a tripped overload without pulling the battery. The robot drops, so hold it. Start stands it up again |
 | **Select**, held 4 s | power off, where it lies — torque went at 2 s, so it does not sit first. The release afterwards does nothing more |

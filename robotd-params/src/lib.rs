@@ -125,11 +125,11 @@ impl Default for PadImuHeadControlParams {
 /// Which pad button runs which skill.
 ///
 /// **The six one-shot buttons, and only those:** the four face buttons and the two bumpers.
-/// `Start` stands the robot up and starts and stops the policy, the D-pad picks what the sticks
-/// mean, and held `Select` cuts torque and then powers the robot off — none of those is a
-/// `robot.do`, and turning them into a general button-to-action vocabulary is a larger thing
-/// than binding a skill needs. It would also put "the button that stops the robot" behind a
-/// config key, which is the one binding worth not being able to lose.
+/// `Start` stands the robot up and toggles the policy, the D-pad picks what the sticks mean, and
+/// held `Select` cuts torque and then powers the robot off — none of those is a `robot.do`, and
+/// turning them into a general button-to-action vocabulary is a larger thing than binding a skill
+/// needs. It would also put "the button that stops the robot" behind a config key, which is the
+/// one binding worth not being able to lose.
 ///
 /// The defaults keep the pad sparse on purpose: A sits or stands, B picks up, the bumpers kick,
 /// and X and Y do nothing until somebody puts a skill there. A named button is rebound; the rest
