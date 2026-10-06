@@ -110,9 +110,13 @@ fn apply_for(key: &str) -> Option<Apply> {
         //
         // `pad_imu_head_control` is the *controller's* IMU steering the head. Not `head_imu` below.
         "pad" | "pad_imu_head_control" | "pad_drive" => Apply::Live("padd"),
-        // `tofd` reads `[head_imu]` out of robotd's file — see `tof/src/config.rs` for why it
-        // reads that file rather than one of its own — and reads it once, at startup.
-        "head_imu" => Apply::Restart("tofd"),
+        // Whichever daemon reads this board's head IMU, once, at startup: `tofd` for the
+        // `zero3`'s BMI088 (it shares the HAT's bus with the ToF; `tof/src/config.rs` says why
+        // it reads robotd's file), `robotd` for the `beta`'s LSM6DSV16X. The board is the
+        // hardware this editor is running on, which is the one whose daemon has to restart.
+        "head_imu" => Apply::Restart(robotd_params::HeadImuParams::reader(
+            robotd_params::board::Board::detected().unwrap_or_default(),
+        )),
         // `[policy]` is the one section a running daemon takes back: `PolicyChange::Reload`
         // re-reads it whole and rebuilds the controller from it, which is how `robotctl policy
         // add` lands a skill without a restart. Two keys are not in that promise:

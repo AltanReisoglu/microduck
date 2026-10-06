@@ -102,6 +102,15 @@ impl ImuStatus {
         );
     }
 
+    /// Served by another daemon on this board — the `beta`'s head IMU is `robotd`'s. Named,
+    /// for the same reason [`Self::off`] names its key: a subscriber that only hears silence
+    /// goes looking at the hardware.
+    pub fn elsewhere(&self, daemon: &str) {
+        self.lost(format!(
+            "on this board the head IMU is read by {daemon}: subscribe to head_imu.stream on its socket"
+        ));
+    }
+
     fn lost(&self, why: String) {
         let mut inner = self.inner.lock().unwrap();
         inner.sensor = None;

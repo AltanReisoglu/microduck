@@ -933,8 +933,10 @@ pub mod method {
     /// One 8×8 depth frame, pushed after [`TOF_STREAM`].
     pub const TOF_FRAME: &str = "tof.frame";
 
-    /// Subscribe to the head IMU (BMI088 on the HAT, same I²C bus as the ToF). The answer
-    /// describes the sensor, then [`HEAD_IMU_FRAME`] notifications arrive until the connection closes.
+    /// Subscribe to the head IMU. Served by `tofd` on `zero3` (the BMI088 on the HAT, same I²C
+    /// bus as the ToF) and by `robotd` on `beta` (the face board's LSM6DSV16X); the other daemon
+    /// answers with `unavailable` naming the right one. The answer describes the sensor, then
+    /// [`HEAD_IMU_FRAME`] notifications arrive until the connection closes.
     pub const HEAD_IMU_STREAM: &str = "head_imu.stream";
 
     /// One head-IMU sample, pushed after [`HEAD_IMU_STREAM`].
@@ -1143,7 +1145,8 @@ pub enum Call {
     PadInput,
     /// Subscribe to the ToF depth stream. Answered by `tofd`.
     TofStream,
-    /// Subscribe to the head IMU (BMI088 on the HAT); see [`method::HEAD_IMU_STREAM`].
+    /// Subscribe to the head IMU (`tofd` on zero3, `robotd` on beta); see
+    /// [`method::HEAD_IMU_STREAM`].
     HeadImuStream,
 }
 
@@ -3900,9 +3903,13 @@ pub struct PoseState {
 pub struct FramesState {
     pub camera: PoseState,
     pub tof: PoseState,
-    /// The head IMU (BMI088) in the trunk frame. The `head_imu.stream` samples are in the IMU's
-    /// own tilted axes; this pose (sensor→trunk, from the same head FK) is how a consumer rotates
+    /// The head IMU in the trunk frame. The `head_imu.stream` samples are in the IMU's own
+    /// tilted axes; this pose (sensor→trunk, from the same head FK) is how a consumer rotates
     /// them into the trunk/camera frame. Absent from a daemon predating it. (v24)
+    ///
+    /// **The mount is the `zero3` HAT's BMI088.** The kinematic model has no `beta` face board
+    /// yet, so on a `beta` this pose does not describe its LSM6DSV16X until the model gains that
+    /// mount.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub head_imu: Option<PoseState>,
 }
@@ -4870,7 +4877,8 @@ pub struct TofFrame {
 #[serde(default)]
 pub struct HeadImuStreamResult {
     pub accepted: bool,
-    /// The IMU that answered, e.g. `BMI088`. `None` when there is none — see `unavailable`.
+    /// The IMU that answered: `BMI088` (zero3) or `LSM6DSV16X` (beta). `None` when there is
+    /// none — see `unavailable`, which also names the daemon to ask when it is not this one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sensor: Option<String>,
     /// Why there is no IMU: not fitted, bus unreadable, chip-id mismatch.
@@ -4882,7 +4890,9 @@ pub struct HeadImuStreamResult {
 
 /// One head-IMU sample — a [`method::HEAD_IMU_FRAME`] notification.
 ///
-/// The BMI088 on the HAT, read by `tofd` (it owns that I²C bus). All values are in the IMU's own
+/// Which chip and which daemon is the board's: on `zero3` the BMI088 on the HAT, read by `tofd`
+/// (it owns that I²C bus) with a Madgwick fusion; on `beta` the face board's LSM6DSV16X, read by
+/// `robotd`, its quaternion fused on the chip (SFLP game vector). All values are in the IMU's own
 /// axes, which are tilted relative to the head/camera — the mount is not axis-aligned. To place a
 /// sample in the trunk/camera frame, rotate it by [`FramesState::head_imu`] (the sensor→trunk
 /// pose the kinematics compute for this tick). This is the head IMU, distinct from the body IMU
@@ -4896,13 +4906,13 @@ pub struct HeadImuFrame {
     pub at_us: u64,
     /// `CLOCK_MONOTONIC` when the sample was read, ns — the clock [`RobotState::t_ns`] shares.
     pub t_ns: u64,
-    /// Angular velocity, rad/s, in the BMI088's own (tilted) sensor axes — NOT the head or
+    /// Angular velocity, rad/s, in the chip's own (tilted) sensor axes — NOT the head or
     /// camera frame. Combine with [`FramesState::head_imu`] (the sensor→trunk pose from the
     /// kinematics) to place it. See that field.
     pub gyro: [f32; 3],
-    /// Specific force, m/s², BMI088 sensor axes.
+    /// Specific force, m/s², the chip's sensor axes.
     pub accel: [f32; 3],
-    /// Madgwick orientation, scalar-first `[w, x, y, z]`, sensor→world (gravity down, yaw
+    /// Orientation, scalar-first `[w, x, y, z]`, sensor→world (gravity down, yaw
     /// arbitrary). The world here is the IMU's own; relate it to the trunk via the mount pose.
     pub quat: [f32; 4],
     /// Chip temperature, °C.

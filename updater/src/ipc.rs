@@ -865,7 +865,7 @@ impl Server {
                 Some(id),
                 proto::Error::new(
                     proto::code::METHOD_NOT_FOUND,
-                    "tof.stream and head_imu.stream are served by tofd itself, on /run/tofd/tof.sock",
+                    "tof.stream is served by tofd, on /run/tofd/tof.sock; head_imu.stream by tofd on a zero3 and by robotd (/run/robotd.sock) on a beta",
                 ),
             ),
 

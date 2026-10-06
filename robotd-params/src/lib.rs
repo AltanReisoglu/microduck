@@ -906,25 +906,75 @@ impl ThereminParams {
     }
 }
 
-/// `[head_imu]` — the BMI088 on the head module, read by `tofd` and served as
-/// `head_imu.stream`.
+/// `[head_imu]` — the IMU in the robot's head, served as `head_imu.stream`. Which chip, and
+/// which daemon reads it, is the board's:
 ///
-/// **One switch, and it is off.** Reading this chip at 100 Hz costs ~3.5–4.5% of a core on an
-/// RK3566, and a bench that isolates the parts says none of it is fixable in the loop: being
-/// woken a hundred times a second is 0.7 points of it, the Madgwick fusion 0.3, and the rest is
-/// the two I²C transactions a sample takes. Fewer bytes is not on offer — a gyro and an
-/// accelerometer sample *is* twelve bytes — so what is left is not reading it, which is this
-/// key, or reading it less often, which is `tofd --imu-hz`.
-///
-/// It stays off until something subscribes to the stream, because for now nothing does: it was
-/// added for the mapping work, and a duck that is not mapping was paying for it from boot.
-/// `docs/project/tof-on-demand.md` is the measurement and the reasoning.
+/// - **`zero3`**: the BMI088 on the HAT, read by `tofd` (it shares the HAT's I²C bus with the
+///   ToF) with a Madgwick fusion on the CPU. Reading it at 100 Hz costs ~3.5–4.5% of a core on
+///   an RK3566, and a bench that isolates the parts says none of it is fixable in the loop:
+///   being woken a hundred times a second is 0.7 points of it, the fusion 0.3, and the rest is
+///   the two I²C transactions a sample takes. So it is **off** unless asked for —
+///   `docs/project/tof-on-demand.md` is the measurement and the reasoning.
+/// - **`beta`**: an LSM6DSV16X on the face board's own bus, read by `robotd`. The chip fuses
+///   orientation itself (SFLP) and batches gyro, accelerometer and quaternion into its FIFO,
+///   so a burst of several samples is one transaction and there is no fusion on the CPU. That
+///   removes what made the BMI088 expensive, so it is **on** unless switched off.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct HeadImuParams {
-    /// Read the head IMU at all. `false` — and derived rather than written out, so the default
-    /// cannot be changed by editing one word. `tofd --imu` overrides it for a session.
-    pub enabled: bool,
+    /// Read the head IMU at all. Absent means the board's default ([`Self::enabled_on`]):
+    /// off on `zero3`, on on `beta`. `tofd --imu` overrides it for a session on `zero3`.
+    pub enabled: Option<bool>,
+}
+
+impl HeadImuParams {
+    /// Whether the head IMU is read on `board`: the file's word if it has one, otherwise the
+    /// board's default — off for the BMI088 a `zero3` reads on the CPU, on for the `beta`'s
+    /// self-fusing LSM6DSV16X.
+    pub fn enabled_on(&self, board: board::Board) -> bool {
+        self.enabled.unwrap_or(match board {
+            board::Board::Zero3 => false,
+            board::Board::Beta => true,
+        })
+    }
+
+    /// The daemon that reads the head IMU on `board`, and so the one to restart when this
+    /// section changes.
+    pub fn reader(board: board::Board) -> &'static str {
+        match board {
+            board::Board::Zero3 => "tofd",
+            board::Board::Beta => "robotd",
+        }
+    }
+}
+
+#[cfg(test)]
+mod head_imu_tests {
+    use super::*;
+    use board::Board;
+
+    /// Off on `zero3`, where reading the BMI088 costs ~4% of a core on the CPU; on on `beta`,
+    /// where the chip fuses and batches itself. An explicit word in the file wins on both.
+    #[test]
+    fn the_default_is_the_boards_and_the_file_wins() {
+        let unset = HeadImuParams::default();
+        assert!(!unset.enabled_on(Board::Zero3));
+        assert!(unset.enabled_on(Board::Beta));
+        let off = HeadImuParams {
+            enabled: Some(false),
+        };
+        assert!(!off.enabled_on(Board::Beta));
+        let on = HeadImuParams {
+            enabled: Some(true),
+        };
+        assert!(on.enabled_on(Board::Zero3));
+    }
+
+    #[test]
+    fn each_board_names_the_daemon_that_reads_it() {
+        assert_eq!(HeadImuParams::reader(Board::Zero3), "tofd");
+        assert_eq!(HeadImuParams::reader(Board::Beta), "robotd");
+    }
 }
 
 /// `[audio]` — the voice and the microphone. All optional equipment: a robot without a
