@@ -38,7 +38,7 @@ use bmi088::{Bmi088, Bmi088Ahrs, Config};
 use linux_embedded_hal::I2cdev;
 
 #[cfg(target_os = "linux")]
-use crate::BUS_CANDIDATES;
+use tof::link::BUS_CANDIDATES;
 
 /// Madgwick convergence rate. 0.1 is the crate's recommended starting point: fast enough to track
 /// a walking head, slow enough not to chase gyro noise.
