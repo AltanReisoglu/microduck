@@ -94,17 +94,19 @@ struct Args {
     #[arg(long, default_value = "/dev/video0")]
     camera_device: String,
 
-    /// Sensor exposure in lines (~19 µs each) and analogue gain, where 256 is 1x.
+    /// Sensor exposure in lines and analogue gain, in the sensor's own units — 256 is 1x on the
+    /// IMX219, 64 on the GC2093.
     ///
     /// The starting values only: with the driver's boot values the picture is black rather than
     /// merely dark, so something must write the sensor before the first frame. On a board where
     /// `scripts/setup-rkaiq.sh` installed the 3A engine, it converges exposure from here; on one
-    /// where it did not, these are what the camera keeps. The defaults are the prototype's.
-    #[arg(long, default_value_t = 600)]
-    exposure: u32,
+    /// where it did not, these are what the camera keeps. Unset is the sensor's own starting point
+    /// (`mediad::sensor`): the same picture on every sensor, which one number in one unit is not.
+    #[arg(long)]
+    exposure: Option<u32>,
 
-    #[arg(long, default_value_t = 1024)]
-    analogue_gain: u32,
+    #[arg(long)]
+    analogue_gain: Option<u32>,
 
     /// How far the camera is mounted from upright, clockwise: 0, 90, 180 or 270.
     ///
@@ -344,7 +346,7 @@ fn main() -> ExitCode {
         ));
 
         // What a control lane can say about this robot's own media: the picture's geometry, and
-        // the frame streamer. Empty until the pipeline is up — `sensor_mode()` is only truthful
+        // the frame streamer. Empty until the pipeline is up — `pinned_sensor()` is only truthful
         // once something has tried to set it, and there are no frames to encode before then — and
         // the relay below is spawned before that on purpose, so the answer has to be able to
         // arrive late rather than be a value passed in now.
@@ -478,17 +480,23 @@ fn main() -> ExitCode {
         // in this function cares: the other two sources have no sensor to meter.
         #[cfg(target_os = "linux")]
         let _exposure = match (&source, args.no_auto_exposure) {
-            (mediad::pipeline::Source::Camera(camera), false) => Some(mediad::exposure::spawn(
-                camera.device.clone(),
-                frames.clone(),
-                camera.exposure,
-                camera.analogue_gain,
-            )),
+            // The pipeline found the sensor to start at all, so this is always `Some` here.
+            (mediad::pipeline::Source::Camera(camera), false) => {
+                mediad::pipeline::sensor().map(|found| {
+                    let (exposure, analogue_gain) = camera.starting(found.sensor);
+                    mediad::exposure::spawn(
+                        camera.device.clone(),
+                        frames.clone(),
+                        found.sensor.exposure,
+                        exposure,
+                        analogue_gain,
+                    )
+                })
+            }
             (mediad::pipeline::Source::Camera(_), true) => {
                 tracing::info!(
-                    exposure = args.exposure,
-                    analogue_gain = args.analogue_gain,
-                    "--no-auto-exposure: the picture stays at the starting exposure"
+                    "--no-auto-exposure: the picture stays at the starting exposure the head \
+                     camera line gave"
                 );
                 None
             }
@@ -548,7 +556,7 @@ fn main() -> ExitCode {
         } else {
             mediad::camera::Intrinsics::published(
                 media.intrinsics.as_ref(),
-                mediad::pipeline::sensor_mode(),
+                mediad::pipeline::pinned_sensor(),
                 width,
                 height,
             )

@@ -537,7 +537,9 @@ robot streaming a test pattern, or one where `media-ctl` would not set the senso
 case the sensor is in its 3280×2464 boot mode, whose field of view is the whole array rather than
 the 1920×1080 crop, and every intrinsic would be off by about 1.7×. `mediad::camera` has the
 arithmetic and the mode table, including the fact that reading 720p off the sensor would *narrow*
-the view to 27° rather than saving anything.
+the view to 27° rather than saving anything. It is also a robot whose sensor nobody has measured —
+the beta board's GC2093 has no field of view and no family solve in `mediad::sensor`, so it
+publishes geometry only once that robot carries its own `[media.intrinsics]`.
 
 ## 11. Everything on the wire should carry the time it happened — **wanted**
 
