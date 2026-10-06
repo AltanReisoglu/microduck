@@ -1142,7 +1142,7 @@ mod tests {
     fn the_pad_sections_need_no_restart_at_all() {
         for key in [
             "pad.a",
-            "pad.dpad_down",
+            "pad.y",
             "pad_imu_head_control.enabled",
             "pad_imu_head_control.gain",
             "pad_drive.vx_max",
