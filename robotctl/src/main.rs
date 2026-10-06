@@ -161,6 +161,14 @@ enum Namespace {
         command: led::LedCommand,
     },
 
+    /// Watch the head IMU live: roll, pitch and yaw of the head, and where it measures up.
+    ///
+    /// Head frame: `x` forward, `y` left, `z` up with the head level, so a level head reads
+    /// roll ≈ 0, pitch ≈ 0 and up ≈ (0, 0, 1). Yaw drifts from wherever the chip started: a game
+    /// rotation has no compass. Served by robotd on a beta; on a zero3 it is tofd's, and this
+    /// says so. Ctrl-C to stop.
+    HeadImu,
+
     /// Play this robot's quack. The loudest way to tell ducks apart: every robot's voice
     /// is generated from its SoC serial, so the one that answers — in a voice that is only
     /// its own — is the one you're SSH'd into.
@@ -1293,6 +1301,77 @@ fn unreachable_hint(service: &str, path: &std::path::Path, e: &std::io::Error) -
              that died leaves behind.  systemctl status {service}"
         ),
         _ => format!("{head}\nIs the service running?  systemctl status {service}"),
+    }
+}
+
+/// Roll, pitch and yaw (degrees, ZYX) of a scalar-first head→world quaternion, and the world's
+/// up expressed in the head frame.
+fn head_attitude(q: [f32; 4]) -> ([f32; 3], [f32; 3]) {
+    let [w, x, y, z] = q;
+    let roll = (2.0 * (w * x + y * z)).atan2(1.0 - 2.0 * (x * x + y * y));
+    let pitch = (2.0 * (w * y - z * x)).clamp(-1.0, 1.0).asin();
+    let yaw = (2.0 * (w * z + x * y)).atan2(1.0 - 2.0 * (y * y + z * z));
+    let up = [
+        2.0 * (x * z - w * y),
+        2.0 * (y * z + w * x),
+        1.0 - 2.0 * (x * x + y * y),
+    ];
+    (
+        [roll.to_degrees(), pitch.to_degrees(), yaw.to_degrees()],
+        up,
+    )
+}
+
+/// `robotctl head-imu`: subscribe on robotd's socket and redraw one line ~10 times a second.
+fn run_head_imu(robot_socket: &Path) -> Result<(), Failure> {
+    let mut client = Client::connect_to("robotd", robot_socket)?;
+    let response = client.call(&proto::Call::HeadImuStream)?;
+    let answer: proto::HeadImuStreamResult = response
+        .result
+        .clone()
+        .and_then(|r| serde_json::from_value(r).ok())
+        .ok_or_else(|| Failure::new(exit::FAILED, format!("unexpected answer: {response:?}")))?;
+    let Some(sensor) = answer.sensor else {
+        let why = answer
+            .unavailable
+            .unwrap_or_else(|| "no reason given".to_owned());
+        return Err(Failure::new(exit::FAILED, format!("no head IMU: {why}")));
+    };
+    println!(
+        "{sensor} at {} Hz, head frame: x forward, y left, z up. Ctrl-C to stop.",
+        answer.hz
+    );
+    let mut last_drawn = Instant::now() - Duration::from_secs(1);
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let read = client
+            .reader
+            .read_line(&mut line)
+            .map_err(|e| Failure::new(exit::UNREACHABLE, format!("connection lost: {e}")))?;
+        if read == 0 {
+            println!();
+            return Err(Failure::new(
+                exit::UNREACHABLE,
+                "robotd closed the stream".into(),
+            ));
+        }
+        let Ok(note) = serde_json::from_str::<proto::Request>(line.trim()) else {
+            continue;
+        };
+        let Some(frame) = note.as_head_imu_frame() else {
+            continue;
+        };
+        if last_drawn.elapsed() < Duration::from_millis(100) {
+            continue;
+        }
+        last_drawn = Instant::now();
+        let ([roll, pitch, yaw], up) = head_attitude(frame.quat);
+        print!(
+            "\rroll {roll:+7.1}°  pitch {pitch:+7.1}°  yaw {yaw:+7.1}°   up ({:+.2}, {:+.2}, {:+.2})   gyro ({:+.2}, {:+.2}, {:+.2}) rad/s ",
+            up[0], up[1], up[2], frame.gyro[0], frame.gyro[1], frame.gyro[2]
+        );
+        let _ = std::io::stdout().flush();
     }
 }
 
@@ -5207,6 +5286,9 @@ fn run(cli: Cli) -> Result<(), Failure> {
         Namespace::Quack => {
             return run_quack(&cli.robot_socket);
         }
+        Namespace::HeadImu => {
+            return run_head_imu(&cli.robot_socket);
+        }
         Namespace::Led { command } => {
             return led::run(Path::new(led::LEDS_DIR), command);
         }
@@ -5489,6 +5571,28 @@ fn journal_for(transcript: &proto::RunTranscript, skip: bool) -> String {
 fn compact(value: &impl serde::Serialize) -> String {
     serde_json::to_string(value).unwrap_or_default()
 }
+#[cfg(test)]
+mod head_imu_tests {
+    use super::head_attitude;
+
+    #[test]
+    fn a_level_head_reads_zero_and_up_is_z() {
+        let (rpy, up) = head_attitude([1.0, 0.0, 0.0, 0.0]);
+        assert!(rpy.iter().all(|a| a.abs() < 1e-4), "{rpy:?}");
+        assert!((up[2] - 1.0).abs() < 1e-6 && up[0].abs() < 1e-6 && up[1].abs() < 1e-6);
+    }
+
+    /// Nose down is positive pitch about y (right-handed, y left), and up then leans back, toward
+    /// -x: the forward axis now points partly down.
+    #[test]
+    fn nose_down_is_positive_pitch() {
+        let half = 15f32.to_radians();
+        let (rpy, up) = head_attitude([half.cos(), 0.0, half.sin(), 0.0]);
+        assert!((rpy[1] - 30.0).abs() < 1e-3, "{rpy:?}");
+        assert!((up[0] + 0.5).abs() < 1e-3, "{up:?}");
+    }
+}
+
 #[cfg(test)]
 mod tests {
 

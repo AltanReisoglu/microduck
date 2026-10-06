@@ -20,6 +20,7 @@
 
 mod chorale;
 mod control;
+mod head_imu;
 mod idle_head;
 mod intents;
 mod params;
@@ -586,6 +587,13 @@ struct RobotState {
     /// that has fallen behind on beacons wants the newest one, not a backlog of beats that have
     /// already passed.
     chorale_tx: tokio::sync::broadcast::Sender<proto::ChoraleAdvertise>,
+    /// Fan-out for `head_imu.stream` on a `beta` (see [`head_imu`]). Lossy like the state stream:
+    /// a subscriber that falls behind loses samples, the reader never waits.
+    head_imu_tx: tokio::sync::broadcast::Sender<proto::HeadImuFrame>,
+    /// What a `head_imu.stream` subscriber is told before the frames: the chip, or why none.
+    head_imu: head_imu::HeadImuStatus,
+    /// Which board this robot is (`[board] version`). Decides the body IMU's mount.
+    board: robotd_params::board::Board,
     /// Why the policy is not loaded, if it is not. Set once at startup; the loop keeps
     /// running and holds the pose, so a broken bundle is a rollback rather than a crash.
     policy_error: ArcSwapOption<String>,
@@ -717,6 +725,9 @@ impl RobotState {
             shutdown: AtomicBool::new(false),
             state_tx: tokio::sync::broadcast::Sender::new(STATE_BUFFER),
             chorale_tx: tokio::sync::broadcast::Sender::new(8),
+            head_imu_tx: tokio::sync::broadcast::Sender::new(head_imu::FRAME_BUFFER),
+            head_imu: head_imu::HeadImuStatus::new(),
+            board: params.board.version,
             policy_error: ArcSwapOption::empty(),
             policy_change_error: ArcSwapOption::empty(),
             policies: ArcSwap::from_pointee(PolicyNames::of(&params.policy.resolved())),
@@ -1026,6 +1037,8 @@ async fn main() -> ExitCode {
 
     let intents = Arc::new(Intents::new());
 
+    start_head_imu(&state, &params, args.fake || args.sim.is_some());
+
     // The real thing. `setsid` detaches the command from this process's cgroup, so the
     // poweroff proceeds while systemd is busy killing robotd itself.
     let poweroff: PowerOff = Arc::new(|| {
@@ -1082,7 +1095,7 @@ fn run_init(params: &Params, duration: Duration) -> ExitCode {
     // The same open as the daemon's, replacement adoption included: `init` is what someone
     // reaches for right after a motor swap, and it must not be the one path that refuses the
     // new servo.
-    let Some(mut io) = open_bus(&params.bus, 0, &mut Vec::new()) else {
+    let Some(mut io) = open_bus(&params.bus, params.board.version, 0, &mut Vec::new()) else {
         return ExitCode::FAILURE;
     };
     if let Err(e) = io.set_torque(true) {
@@ -1290,7 +1303,7 @@ async fn open_bus_waiting(bus: &params::Bus, state: &RobotState) -> Option<BusIo
         // Logging lives in `open_bus`, which is chatty by design on the first attempt and
         // quiet thereafter — a board waiting overnight must not fill the journal.
         let mut missing = Vec::new();
-        if let Some(io) = open_bus(bus, attempt, &mut missing) {
+        if let Some(io) = open_bus(bus, state.board, attempt, &mut missing) {
             state.startup_bus_failures.store(0, Ordering::Relaxed);
             state.startup_missing.store(Arc::new(Vec::new()));
             return Some(io);
@@ -1312,8 +1325,23 @@ async fn open_bus_waiting(bus: &params::Bus, state: &RobotState) -> Option<BusIo
 }
 
 /// Open and verify the bus, or explain why not.
+/// The body IMU's sensor→trunk mount on `board`: the power board stands on edge in a `zero3`
+/// and lies flat in a `beta`.
+fn body_imu_mount(board: robotd_params::board::Board) -> [f64; 4] {
+    use duck_control::imu::SflpDecoder;
+    match board {
+        robotd_params::board::Board::Zero3 => SflpDecoder::DEFAULT_MOUNT,
+        robotd_params::board::Board::Beta => SflpDecoder::BETA_MOUNT,
+    }
+}
+
 #[cfg(target_os = "linux")]
-fn open_bus(bus: &params::Bus, attempt: u32, missing: &mut Vec<u8>) -> Option<BusIo> {
+fn open_bus(
+    bus: &params::Bus,
+    board: robotd_params::board::Board,
+    attempt: u32,
+    missing: &mut Vec<u8>,
+) -> Option<BusIo> {
     // First attempt and every thirtieth — about one line per 30 s while waiting.
     let loud = attempt == 0 || attempt.is_multiple_of(STARTUP_READ_LOG_EVERY);
     let port = bus.port.as_str();
@@ -1327,6 +1355,7 @@ fn open_bus(bus: &params::Bus, attempt: u32, missing: &mut Vec<u8>) -> Option<Bu
             return None;
         }
     };
+    io.set_imu_mount(body_imu_mount(board));
     // Under the same `loud` rule as everything else here — a board waiting on servo power
     // retries this forever. Worth saying at all because the whole tick budget hangs off it,
     // and "turned off in robotd.toml" is otherwise indistinguishable from "this board is slow".
@@ -1418,7 +1447,12 @@ fn adopt_missing_servo(io: &mut BusIo, loud: bool, silent: &mut Vec<u8>) -> bool
 }
 
 #[cfg(not(target_os = "linux"))]
-fn open_bus(_bus: &params::Bus, _attempt: u32, _missing: &mut Vec<u8>) -> Option<BusIo> {
+fn open_bus(
+    _bus: &params::Bus,
+    _board: robotd_params::board::Board,
+    _attempt: u32,
+    _missing: &mut Vec<u8>,
+) -> Option<BusIo> {
     tracing::error!("no bus on this platform; use --fake");
     None
 }
@@ -3968,6 +4002,71 @@ async fn claim_socket(socket_path: &Path) -> std::io::Result<(std::fs::File, Uni
     Ok((lock, listener))
 }
 
+/// Read the head IMU on its own thread, if this board's head IMU is robotd's and it is on.
+///
+/// Only the `beta`'s is: on `zero3` the BMI088 is tofd's (it shares the HAT's bus with the ToF),
+/// and a subscriber here is told so rather than handed silence.
+fn start_head_imu(state: &Arc<RobotState>, params: &Params, no_hardware: bool) {
+    use robotd_params::board::Board;
+    let board = params.board.version;
+    if board != Board::Beta {
+        state.head_imu.lost(format!(
+            "on this board the head IMU is read by {}: subscribe to head_imu.stream on its socket",
+            robotd_params::HeadImuParams::reader(board)
+        ));
+        return;
+    }
+    if !params.head_imu.enabled_on(board) {
+        tracing::info!("the head IMU is off; [head_imu] enabled = true to read it");
+        state.head_imu.off();
+        return;
+    }
+    if no_hardware {
+        state
+            .head_imu
+            .lost("--fake/--sim: there is no head IMU behind either".to_owned());
+        return;
+    }
+    let state = Arc::clone(state);
+    let spawned = std::thread::Builder::new()
+        .name("head-imu".into())
+        .spawn(move || head_imu::run(&state.head_imu, &state.head_imu_tx, &state.shutdown));
+    if let Err(e) = spawned {
+        tracing::error!(error = %e, "cannot start the head IMU reader");
+    }
+}
+
+/// A `head_imu.stream` subscription: frames as notifications until the client goes away.
+///
+/// The connection is the stream from here on, as on `tofd`'s socket: one request, then only
+/// server notifications. Input is read and discarded so a hang-up is noticed even while no frame
+/// is coming (an IMU that is off or absent never wakes the channel).
+async fn stream_head_imu(
+    write_half: &mut tokio::net::unix::OwnedWriteHalf,
+    lines: &mut tokio::io::Lines<BufReader<tokio::net::unix::OwnedReadHalf>>,
+    frames: &mut tokio::sync::broadcast::Receiver<proto::HeadImuFrame>,
+) -> std::io::Result<()> {
+    loop {
+        tokio::select! {
+            line = lines.next_line() => {
+                if line?.is_none() {
+                    return Ok(());
+                }
+            }
+            received = frames.recv() => match received {
+                Ok(frame) => {
+                    write_line(write_half, &proto::Request::notify_head_imu_frame(&frame)).await?;
+                }
+                // Lagged: the gap shows in `seq`; carry on from the newest.
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::debug!(dropped = n, "head IMU subscriber fell behind");
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return Ok(()),
+            },
+        }
+    }
+}
+
 async fn serve(
     state: Arc<RobotState>,
     intents: Arc<Intents>,
@@ -4135,6 +4234,13 @@ async fn handle(
             }
             continue;
         };
+
+        if let Ok(proto::Call::HeadImuStream) = &call {
+            let response = proto::Response::ok(Some(id), &state.head_imu.result());
+            write_line(&mut write_half, &response).await?;
+            let mut frames = state.head_imu_tx.subscribe();
+            return stream_head_imu(&mut write_half, &mut lines, &mut frames).await;
+        }
 
         if let Ok(proto::Call::ChoraleSubscribe) = &call {
             // `btd` asking what to put on the air. One connection carries both directions: this

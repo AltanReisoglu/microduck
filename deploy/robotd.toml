@@ -422,22 +422,20 @@ mode = "walk"
 # threshold = 0.35
 
 [head_imu]
-# The BMI088 on the head module, read by tofd and served as `head_imu.stream` — gyro,
-# acceleration and a Madgwick orientation, for the mapping work.
+# The IMU in the robot's head, served as `head_imu.stream`: gyro, acceleration and an
+# orientation. Unset, the board decides:
 #
-# **Off by default, and this is the whole section.** Reading it at 100 Hz costs ~3.5-4.5% of a
-# core on this SoC, and a bench that takes the loop apart says none of that is fixable: the
-# wakeups are 0.7 points of it, the fusion 0.3, and the rest is the two I²C transactions a
-# sample takes — which is what a gyro and an accelerometer sample *is*. Nothing subscribes to
-# the stream yet, so every duck was paying it from boot for nobody.
+# - zero3: the BMI088 on the HAT, read by tofd with a Madgwick fusion on the CPU. **Off.**
+#   Reading it at 100 Hz costs ~3.5-4.5% of a core, almost all of it the two I²C transactions a
+#   sample takes (docs/project/tof-on-demand.md). `tofd --imu-hz 50` halves that.
+# - beta: the face board's LSM6DSV16X, read by robotd. **On.** The chip fuses the orientation
+#   itself and batches gyro, accel and quaternion in its FIFO, so 60 samples a second cost
+#   15 burst reads and no fusion.
 #
-# Turn it on when something reads it. `tofd --imu-hz 50` is the other lever: the cost is linear
-# in the rate. Depth is unaffected either way — tofd ranges the ToF regardless, so
-# `robotctl monitor`'s grid does not depend on this.
-#
-# A subscriber to `head_imu.stream` while this is off gets the reason, naming this key, rather
-# than the silence a board with no sensor fitted gives.
-# enabled = false
+# Ask the daemon that does not read it on this board and the answer names the one that does.
+# While it is off, the answer names this key rather than giving the silence of a board with no
+# sensor fitted. Depth is unaffected either way.
+# enabled = true
 
 [chorale]
 # Several ducks singing one piece in four parts, found over Bluetooth with no shared clock: the
