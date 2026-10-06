@@ -3769,6 +3769,7 @@ mod tests {
             bus: proto::BusHealth {
                 consecutive_errors: 0,
                 startup_failures: 3,
+                ..Default::default()
             },
             ..Default::default()
         };
