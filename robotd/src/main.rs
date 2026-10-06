@@ -1196,11 +1196,80 @@ fn spawn_control_thread(
             // loop has not completed a cycle yet", forever, whatever happened to the robot
             // afterwards. Retrying the read alone was not enough: execution never got there.
             runtime.block_on(async move {
-                if let Some(io) = open_bus_waiting(&bus, &state).await {
+                // The voice works while the bus does not: a robot waiting on unplugged servos
+                // still quacks. Stopped before the loop starts, which then owns the speaker.
+                let waiting_voice = WaitingVoice::start(&params, Arc::clone(&intents));
+                let io = open_bus_waiting(&bus, &state).await;
+                drop(waiting_voice);
+                if let Some(io) = io {
                     control_loop(io, state, intents, params, params_path, period, poweroff).await;
                 }
             });
         })
+}
+
+/// How often the waiting voice looks for a queued sound. The loop takes them every 20 ms tick;
+/// this matches it, so a quack sounds the same whether the bus is up or not.
+const WAITING_VOICE_POLL: Duration = Duration::from_millis(20);
+
+/// One-shot sounds while the bus is not up yet.
+///
+/// Sounds are played from the control loop, once a tick — and there are no ticks until the bus
+/// answers, so a robot with servos unplugged or unpowered accepted `robotctl quack` and never
+/// played it. The speaker needs none of the servos. This plays the queued one-shots from a thread
+/// of its own for as long as [`open_bus_waiting`] waits, and is dropped before the loop builds its
+/// own voice, so the PCM has one owner at a time.
+///
+/// One-shots only: the wheee ride, the theremin and the chorale are the loop's, because they
+/// follow what the robot is doing, and a robot waiting for its bus is doing nothing.
+struct WaitingVoice {
+    stop: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl WaitingVoice {
+    /// `None` when audio is off — the IPC refuses sounds then anyway — or the thread will not
+    /// start, which only costs the sounds until the bus is up.
+    fn start(params: &Params, intents: Arc<Intents>) -> Option<Self> {
+        if !params.audio.enabled {
+            return None;
+        }
+        // The same device choice the loop makes, so a board without the configured card plays
+        // on ALSA's default here too.
+        let audio = params.audio.resolve_devices(&robotd_params::alsa_card_ids(
+            &std::fs::read_to_string("/proc/asound/cards").unwrap_or_default(),
+        ));
+        let mut voice = sound::Sound::new(params.audio.bank.clone(), audio.playback);
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopped = Arc::clone(&stop);
+        let thread = std::thread::Builder::new()
+            .name("waiting-voice".into())
+            .spawn(move || {
+                while !stopped.load(Ordering::Relaxed) {
+                    for tag in intents.take_sounds() {
+                        voice.play(tag.as_str(), false);
+                    }
+                    std::thread::sleep(WAITING_VOICE_POLL);
+                }
+            })
+            .map_err(|e| {
+                tracing::warn!(error = %e, "no voice until the bus is up");
+            })
+            .ok()?;
+        Some(Self {
+            stop,
+            thread: Some(thread),
+        })
+    }
+}
+
+impl Drop for WaitingVoice {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
 }
 
 /// The real bus on the board; a fake elsewhere, so `open_bus_waiting` has one signature.
@@ -7257,6 +7326,46 @@ mod tests {
         assert!(throttle.throttled());
         assert_eq!(throttle.khz, 408_000);
         assert!(health.healthy);
+    }
+
+    /// **A quack while the bus is down is played, not left queued.** Before this, sounds were
+    /// taken only by the control loop's tick, and a robot with servos missing never ticks.
+    #[test]
+    fn the_waiting_voice_takes_sounds_while_there_is_no_loop() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut params = Params::default();
+        params.audio.enabled = true;
+        // No bank: `play` logs once and spawns nothing, so this runs off a board.
+        params.audio.bank = dir.path().join("no-bank");
+        let intents = Arc::new(Intents::new());
+
+        let voice = WaitingVoice::start(&params, Arc::clone(&intents)).expect("audio is on");
+        intents.request_sound(proto::SoundParams {
+            tag: proto::SoundTag::Chirp,
+            hold: None,
+        });
+        std::thread::sleep(WAITING_VOICE_POLL * 10);
+        assert!(
+            intents.take_sounds().is_empty(),
+            "the waiting voice should have taken it"
+        );
+
+        // Dropped, it stops taking: from here the loop owns the sounds.
+        drop(voice);
+        intents.request_sound(proto::SoundParams {
+            tag: proto::SoundTag::Chirp,
+            hold: None,
+        });
+        std::thread::sleep(WAITING_VOICE_POLL * 5);
+        assert_eq!(intents.take_sounds(), vec![proto::SoundTag::Chirp]);
+    }
+
+    /// Audio off is no voice at all, waiting or not.
+    #[test]
+    fn no_waiting_voice_with_audio_off() {
+        let mut params = Params::default();
+        params.audio.enabled = false;
+        assert!(WaitingVoice::start(&params, Arc::new(Intents::new())).is_none());
     }
 
     /// While waiting, health must say *why*. The update system quotes this string as the
