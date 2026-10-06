@@ -571,7 +571,11 @@ second; no restart.
 There is no stop button: release the sticks and the robot stands, and `robotd`'s deadman stops it
 if `padd` dies. **If the pad drops out while driving**, the robot asks where it went (a rising
 quack), and after a second sits down if it was standing — kicks and picks are let finish first.
-When the pad comes back it greets you with a quack; A stands the robot up. On a roller robot (`mode = "roller"` in `robotd.toml`) the sticks take the roller
+When the pad comes back it greets you with a quack; A stands the robot up.
+
+**Left alone, the robot looks around.** After 5 s with the policy running, no motion asked for
+and nobody steering the head, the head sweeps slowly left and right (±20°, one sweep every 10 s).
+It fades in and out, and any stick or head command takes the head straight back. On a roller robot (`mode = "roller"` in `robotd.toml`) the sticks take the roller
 shaping automatically — asymmetric push/brake, no strafe — and B triggers the crouch. The
 other skills ride along: sit and the kicks work on wheels too, as the prototype has it.
 
