@@ -437,7 +437,15 @@ pub const JSONRPC_VERSION: &str = "2.0";
 /// [`method::ROBOT_REST`]: `robot.shutdown`'s sit and rest pose, ending in torque off and a servo
 /// reboot instead of a power-off. The pad's held Select, released before the power-off threshold.
 /// A new route: a `robotd` predating it answers METHOD_NOT_FOUND, by name.
-pub const API_VERSION: u32 = 39;
+///
+/// # v40 — an IMU board that does not answer, while the bus is coming up
+///
+/// [`ImuHealth::missing`]: every servo answered and the IMU board did not. The first combined read
+/// then failed on every attempt, and `robot.health` said "no robot on the motor bus" — the wording
+/// for servo power being off — about a robot whose fifteen servos had just answered their pings.
+/// Additive: absent from an older `robotd`, and `false` reads as "not told", which is what the old
+/// wording assumed anyway.
+pub const API_VERSION: u32 = 40;
 
 /// The observation width every policy this robot family runs is built against.
 ///
@@ -3647,6 +3655,12 @@ pub struct ImuHealth {
     /// `sync_read` — so the bus reports no error and `ready` stays true — and repeats itself on
     /// every tick, which makes the run climb without bound. See [`ImuHealth::frozen`].
     pub consecutive_stale_blocks: u64,
+    /// While the bus is coming up: every servo answered its ping and the IMU board did not.
+    /// `robotd` waits rather than run without orientation, so this is also why it is not
+    /// ticking. Cleared once the bus is up; never set at runtime, where a board that stops
+    /// answering shows as consecutive bus read failures instead.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub missing: bool,
 }
 
 impl ImuHealth {
@@ -6452,6 +6466,10 @@ mod tests {
         assert!(
             !imu.frozen(),
             "a default run must never look like a dead IMU"
+        );
+        assert!(
+            !imu.missing,
+            "and an older robotd never claims the board is gone"
         );
     }
 

@@ -549,6 +549,8 @@ struct RobotState {
     /// While waiting: the servo IDs the last ping round found silent. Empty once the bus is up,
     /// and when the port would not open at all — then nothing was asked.
     startup_missing: ArcSwap<Vec<u8>>,
+    /// While waiting: every servo answered and the IMU board did not. False once the bus is up.
+    startup_imu_missing: AtomicBool,
     /// Motor-bus voltage, EMA-smoothed, as `f64::to_bits`. Zero means *not read yet* — a
     /// distinction that has to survive to the wire, since zero volts and unknown volts look
     /// nothing alike to whoever is deciding whether to charge the robot.
@@ -712,6 +714,7 @@ impl RobotState {
             consecutive_errors: AtomicU32::new(0),
             startup_bus_failures: AtomicU32::new(0),
             startup_missing: ArcSwap::from_pointee(Vec::new()),
+            startup_imu_missing: AtomicBool::new(false),
             battery_v: AtomicU64::new(0),
             motor_max_c: AtomicU64::new(0),
             motor_mean_c: AtomicU64::new(0),
@@ -787,6 +790,7 @@ impl RobotState {
                     ready: self.imu_ready.load(Ordering::Relaxed),
                     stale_blocks: self.imu_stale_blocks.load(Ordering::Relaxed),
                     consecutive_stale_blocks: self.imu_stale_run.load(Ordering::Relaxed),
+                    missing: self.startup_imu_missing.load(Ordering::Relaxed),
                 }),
             };
 
@@ -825,6 +829,14 @@ impl RobotState {
                         } else {
                             "are they"
                         },
+                    ));
+                }
+                // Every servo answering is a robot, whatever the first read went on to do.
+                if self.startup_imu_missing.load(Ordering::Relaxed) {
+                    return degraded(format!(
+                        "the IMU board (id {}) is not answering on the motor bus after \
+                         {waiting} attempts; is it plugged in?",
+                        duck_control::model::IMU_DXL_ID,
                     ));
                 }
                 return degraded(format!(
@@ -1302,15 +1314,23 @@ async fn open_bus_waiting(bus: &params::Bus, state: &RobotState) -> Option<BusIo
         // Logging lives in `open_bus`, which is chatty by design on the first attempt and
         // quiet thereafter — a board waiting overnight must not fill the journal.
         let mut missing = Vec::new();
-        if let Some(io) = open_bus(bus, state.board, attempt, &mut missing) {
-            state.startup_bus_failures.store(0, Ordering::Relaxed);
-            state.startup_missing.store(Arc::new(Vec::new()));
-            return Some(io);
+        let mut imu_missing = false;
+        if let Some(mut io) = open_bus(bus, state.board, attempt, &mut missing) {
+            if imu_answers(&mut io, attempt) {
+                state.startup_bus_failures.store(0, Ordering::Relaxed);
+                state.startup_missing.store(Arc::new(Vec::new()));
+                state.startup_imu_missing.store(false, Ordering::Relaxed);
+                return Some(io);
+            }
+            imu_missing = true;
         }
         attempt += 1;
         // Published before sleeping, so `robot.health` can name the cause immediately — and
-        // which servos, when some answered and these did not.
+        // which servos, when some answered and these did not, or that it is the IMU board.
         state.startup_missing.store(Arc::new(missing));
+        state
+            .startup_imu_missing
+            .store(imu_missing, Ordering::Relaxed);
         state.startup_bus_failures.store(attempt, Ordering::Relaxed);
 
         // Nothing to retry on a platform that has no bus at all.
@@ -1379,6 +1399,42 @@ fn open_bus(
         }
     }
     Some(io)
+}
+
+/// Does the IMU board answer, now that every servo has?
+///
+/// Outside [`open_bus`] because `init` shares that and has no use for orientation: ramping to
+/// the home pose must keep working on a robot with its IMU unplugged. The daemon does need it,
+/// and without this ping the first combined read is what fails — and health, with nothing more
+/// specific to go on, blames the whole bus.
+#[cfg(target_os = "linux")]
+fn imu_answers(io: &mut BusIo, attempt: u32) -> bool {
+    let loud = attempt == 0 || attempt.is_multiple_of(STARTUP_READ_LOG_EVERY);
+    let id = duck_control::model::IMU_DXL_ID;
+    match io.imu_answers() {
+        Ok(true) => true,
+        Ok(false) => {
+            if loud {
+                tracing::error!(
+                    attempt,
+                    id,
+                    "every servo answered and the IMU board did not; waiting, is it plugged in?"
+                );
+            }
+            false
+        }
+        Err(e) => {
+            if loud {
+                tracing::error!(error = %e, attempt, id, "cannot ping the IMU board; waiting");
+            }
+            false
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn imu_answers(_io: &mut BusIo, _attempt: u32) -> bool {
+    true
 }
 
 /// The motor-swap path: if exactly one expected servo is silent and a factory-fresh one
@@ -7774,6 +7830,34 @@ mod tests {
             "{reason}"
         );
         assert!(reason.contains("is it plugged in?"), "{reason}");
+    }
+
+    /// Every servo answering and the IMU board silent is a robot with its IMU unplugged, not "no
+    /// robot on the motor bus" — which is what this said, because the first combined read was the
+    /// only thing that ever asked the IMU anything.
+    #[test]
+    fn health_names_a_silent_imu_board_rather_than_the_whole_bus() {
+        let s = RobotState::new(
+            &Params::default(),
+            std::path::Path::new("/test/robotd.toml"),
+            false,
+            false,
+        );
+        s.startup_bus_failures.store(4, Ordering::Relaxed);
+        s.startup_imu_missing.store(true, Ordering::Relaxed);
+
+        let health = s.health();
+        assert!(
+            health.degraded,
+            "a bench board must not roll a release back"
+        );
+        assert!(health.imu.expect("always attached").missing);
+        let reason = health.reason.unwrap();
+        assert!(
+            reason.starts_with("the IMU board (id 200) is not answering"),
+            "{reason}"
+        );
+        assert!(!reason.contains("no robot"), "{reason}");
     }
 
     /// **The regression.** A bus that cannot be *opened* — or whose register check fails,
