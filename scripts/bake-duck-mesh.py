@@ -48,6 +48,13 @@ HIDDEN = {
     "motor_support",
 }
 
+# Colours the MJCF gets wrong, by mesh name, as 0–1 RGB. The CAD export paints the
+# battery the same light grey as the shells; the real NP-F970 pack is black, and drawn
+# light it reads as part of the body rather than the battery strapped to its back.
+RECOLOR = {
+    "np_f970": (0.16, 0.16, 0.18),
+}
+
 
 def load_stl(path: Path) -> np.ndarray:
     """Binary STL → (n, 3, 3) float32 triangle corners. Meters, as exported."""
@@ -176,7 +183,7 @@ def main() -> None:
                 {
                     "body": index,
                     "mesh": mesh_index(name),
-                    "rgb": materials[geom.get("material")],
+                    "rgb": RECOLOR.get(name, materials[geom.get("material")]),
                     "pos": parse_floats(geom.get("pos"), "0 0 0"),
                     "quat": parse_floats(geom.get("quat"), "1 0 0 0"),
                 }
