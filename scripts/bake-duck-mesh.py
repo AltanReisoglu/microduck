@@ -36,11 +36,11 @@ JOINT_NAMES = [
     "right_hip_yaw", "right_hip_roll", "right_hip_pitch", "right_knee", "right_ankle",
 ]
 
-# Parts that exist in the CAD but are enclosed by shells: batteries, PCBs, brackets.
-# Invisible from outside, and at this decimation level their triangles would poke
-# through the shell that hides them — dropping them is both lighter and more correct.
+# Parts that exist in the CAD but are enclosed by shells: PCBs, brackets. Invisible
+# from outside, and at this decimation level their triangles would poke through the
+# shell that hides them — dropping them is both lighter and more correct. The battery
+# (`np_f970`) is not one of them: it rides outside the trunk and is drawn.
 HIDDEN = {
-    "np_f970",
     "pcb__raspberry_pi_zero_2_w",
     "elec_rpi_robot_hat_pcb",
     "power_support",
