@@ -1333,13 +1333,18 @@ async fn open_bus_waiting(bus: &params::Bus, state: &RobotState) -> Option<BusIo
         let mut missing = Vec::new();
         let mut imu_missing = false;
         if let Some(mut io) = open_bus(bus, state.board, attempt, &mut missing) {
-            if imu_answers(&mut io, attempt) {
-                state.startup_bus_failures.store(0, Ordering::Relaxed);
-                state.startup_missing.store(Arc::new(Vec::new()));
-                state.startup_imu_missing.store(false, Ordering::Relaxed);
-                return Some(io);
+            match imu_answers(&mut io, attempt) {
+                Some(true) => {
+                    state.startup_bus_failures.store(0, Ordering::Relaxed);
+                    state.startup_missing.store(Arc::new(Vec::new()));
+                    state.startup_imu_missing.store(false, Ordering::Relaxed);
+                    return Some(io);
+                }
+                Some(false) => imu_missing = true,
+                // The ping itself failed: a bus fault, not an answer, so health keeps the
+                // generic wording rather than send someone looking for an unplugged board.
+                None => {}
             }
-            imu_missing = true;
         }
         attempt += 1;
         // Published before sleeping, so `robot.health` can name the cause immediately — and
@@ -1402,7 +1407,9 @@ fn open_bus(
         return None;
     }
     match io.check_registers() {
-        Ok(0) => tracing::info!("motor registers already correct"),
+        // Gated too: a board waiting on its IMU board gets this far every attempt.
+        Ok(0) if loud => tracing::info!("motor registers already correct"),
+        Ok(0) => {}
         Ok(n) => tracing::warn!(corrected = n, "motor registers corrected"),
         Err(e) => {
             if loud {
@@ -1424,12 +1431,14 @@ fn open_bus(
 /// the home pose must keep working on a robot with its IMU unplugged. The daemon does need it,
 /// and without this ping the first combined read is what fails — and health, with nothing more
 /// specific to go on, blames the whole bus.
+///
+/// `None` when the ping could not be made at all, which says nothing about the board.
 #[cfg(target_os = "linux")]
-fn imu_answers(io: &mut BusIo, attempt: u32) -> bool {
+fn imu_answers(io: &mut BusIo, attempt: u32) -> Option<bool> {
     let loud = attempt == 0 || attempt.is_multiple_of(STARTUP_READ_LOG_EVERY);
     let id = duck_control::model::IMU_DXL_ID;
     match io.imu_answers() {
-        Ok(true) => true,
+        Ok(true) => Some(true),
         Ok(false) => {
             if loud {
                 tracing::error!(
@@ -1438,20 +1447,20 @@ fn imu_answers(io: &mut BusIo, attempt: u32) -> bool {
                     "every servo answered and the IMU board did not; waiting, is it plugged in?"
                 );
             }
-            false
+            Some(false)
         }
         Err(e) => {
             if loud {
                 tracing::error!(error = %e, attempt, id, "cannot ping the IMU board; waiting");
             }
-            false
+            None
         }
     }
 }
 
 #[cfg(not(target_os = "linux"))]
-fn imu_answers(_io: &mut BusIo, _attempt: u32) -> bool {
-    true
+fn imu_answers(_io: &mut BusIo, _attempt: u32) -> Option<bool> {
+    Some(true)
 }
 
 /// The motor-swap path: if exactly one expected servo is silent and a factory-fresh one
