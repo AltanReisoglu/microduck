@@ -2042,6 +2042,10 @@ fn render_health(report: &HealthReport) -> String {
                 (0, n) if health.bus.partly_missing() => {
                     format!("missing {}, {n} attempts", health.bus.describe_missing())
                 }
+                // Every servo answered, so there is a robot; the IMU row says what is missing.
+                (0, n) if health.imu.is_some_and(|imu| imu.missing) => {
+                    format!("servos ok, waiting for the IMU board, {n} attempts")
+                }
                 (0, n) => format!("waiting for a robot to answer, {n} attempts"),
                 (n, _) => format!("{n} consecutive read failures"),
             };
@@ -2079,7 +2083,11 @@ fn render_health(report: &HealthReport) -> String {
                     out,
                     "  {:<9} {}{stale}",
                     "imu",
-                    if imu.ready { "ready" } else { "not ready" },
+                    match (imu.missing, imu.ready) {
+                        (true, _) => "not answering on the motor bus — is it plugged in?",
+                        (false, true) => "ready",
+                        (false, false) => "not ready",
+                    },
                 );
             }
 
@@ -6829,6 +6837,7 @@ mod tests {
                     ready: true,
                     stale_blocks: 0,
                     consecutive_stale_blocks: 0,
+                    ..Default::default()
                 }),
                 ..Default::default()
             }),
@@ -6969,6 +6978,7 @@ mod tests {
                     ready: false,
                     stale_blocks: 0,
                     consecutive_stale_blocks: 0,
+                    ..Default::default()
                 }),
                 ..Default::default()
             }),
@@ -7008,6 +7018,7 @@ mod tests {
                     ready: true,
                     stale_blocks: 41,
                     consecutive_stale_blocks: 41,
+                    ..Default::default()
                 }),
                 ..Default::default()
             }),
@@ -7017,6 +7028,43 @@ mod tests {
         assert!(out.contains("7 consecutive read failures"), "{out}");
         assert!(out.contains("orientation frozen"), "{out}");
         assert!(out.contains("41 stale reads running"), "{out}");
+    }
+
+    /// A silent IMU board is named on its own row, and the bus row does not go looking for a robot
+    /// whose servos have all answered.
+    #[test]
+    fn health_renders_a_silent_imu_board() {
+        let out = render_health(&health_report(
+            Some(proto::HealthResult {
+                healthy: false,
+                degraded: true,
+                reason: Some(
+                    "the IMU board (id 200) is not answering on the motor bus after 4 attempts; \
+                     is it plugged in?"
+                        .into(),
+                ),
+                bus: proto::BusHealth {
+                    startup_failures: 4,
+                    ..Default::default()
+                },
+                imu: Some(proto::ImuHealth {
+                    missing: true,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            None,
+        ));
+
+        assert!(
+            out.contains("bus       servos ok, waiting for the IMU board, 4 attempts"),
+            "{out}"
+        );
+        assert!(
+            out.contains("imu       not answering on the motor bus"),
+            "{out}"
+        );
+        assert!(!out.contains("waiting for a robot"), "{out}");
     }
 
     /// A handful of stale reads over a long run is a healthy board, and must not wear an alarm.
@@ -7043,6 +7091,7 @@ mod tests {
                     stale_blocks: 9,
                     // The board refreshed on the most recent read, so nothing is frozen.
                     consecutive_stale_blocks: 0,
+                    ..Default::default()
                 }),
                 ..Default::default()
             }),
@@ -7073,6 +7122,7 @@ mod tests {
                     ready: true,
                     stale_blocks: 2,
                     consecutive_stale_blocks: 1,
+                    ..Default::default()
                 }),
                 ..Default::default()
             }),
@@ -7095,6 +7145,7 @@ mod tests {
                     ready: true,
                     stale_blocks: 3,
                     consecutive_stale_blocks: 0,
+                    ..Default::default()
                 }),
                 ..Default::default()
             }),
