@@ -438,14 +438,20 @@ pub const JSONRPC_VERSION: &str = "2.0";
 /// reboot instead of a power-off. The pad's held Select, released before the power-off threshold.
 /// A new route: a `robotd` predating it answers METHOD_NOT_FOUND, by name.
 ///
-/// # v40 — an IMU board that does not answer, while the bus is coming up
+/// # v40 — `robot.flashlight`
+///
+/// [`method::ROBOT_FLASHLIGHT`]: the beta board's RGB LED as a flashlight, on, off or toggled, in
+/// one of the seven colours three on/off channels make. The pad's Home button toggles it. A new
+/// route: a `robotd` predating it answers METHOD_NOT_FOUND, by name.
+///
+/// # v41 — an IMU board that does not answer, while the bus is coming up
 ///
 /// [`ImuHealth::missing`]: every servo answered and the IMU board did not. The first combined read
 /// then failed on every attempt, and `robot.health` said "no robot on the motor bus" — the wording
 /// for servo power being off — about a robot whose fifteen servos had just answered their pings.
 /// Additive: absent from an older `robotd`, and `false` reads as "not told", which is what the old
 /// wording assumed anyway.
-pub const API_VERSION: u32 = 40;
+pub const API_VERSION: u32 = 41;
 
 /// The observation width every policy this robot family runs is built against.
 ///
@@ -479,6 +485,8 @@ pub const ROBOT_MODEL: &str = "microduck";
 pub const UPDATE_MAX_SILENCE_SECONDS: u64 = 600;
 
 pub const DEFAULT_SOCKET: &str = "/run/updaterd.sock";
+
+pub mod led;
 
 /// Where each service listens by default.
 ///
@@ -712,6 +720,9 @@ pub mod method {
     /// is diagnostics, not danger), but "accepted" from a robot that cannot make a sound
     /// would make `robotctl quack` lie about which duck answered.
     pub const ROBOT_SOUND: &str = "robot.sound";
+    /// Switch the flashlight — the face's RGB LED — on, off, or over, in a colour. Discrete; send
+    /// as a request. Refused, with a reason, by a board without one (the Zero 3W, the simulator).
+    pub const ROBOT_FLASHLIGHT: &str = "robot.flashlight";
     /// Pick the ToF theremin up, or put it down: the head's depth sensor becomes an
     /// instrument, and the distance of a hand in front of the beak is the pitch — and the
     /// mouth opening, which rises with it, so the note is visible as well as audible.
@@ -1060,6 +1071,8 @@ pub enum Call {
     RobotMouth(MouthParams),
     /// Play a voice-bank sound.
     RobotSound(SoundParams),
+    /// Switch the flashlight. See [`method::ROBOT_FLASHLIGHT`].
+    RobotFlashlight(FlashlightParams),
     /// Pick the ToF theremin up or put it down. Discrete; the answer is [`ThereminResult`].
     RobotTheremin(ThereminParams),
     /// Start or stop looking for other ducks to sing with. Discrete; the answer is
@@ -1240,6 +1253,7 @@ impl Call {
             Call::RobotPose(_) => method::ROBOT_POSE,
             Call::RobotMouth(_) => method::ROBOT_MOUTH,
             Call::RobotSound(_) => method::ROBOT_SOUND,
+            Call::RobotFlashlight(_) => method::ROBOT_FLASHLIGHT,
             Call::RobotTheremin(_) => method::ROBOT_THEREMIN,
             Call::RobotChorale(_) => method::ROBOT_CHORALE,
             Call::ChoraleSubscribe => method::CHORALE_SUBSCRIBE,
@@ -1424,6 +1438,7 @@ impl Call {
             | Call::RobotPose(_)
             | Call::RobotMouth(_)
             | Call::RobotSound(_)
+            | Call::RobotFlashlight(_)
             | Call::RobotTheremin(_)
             | Call::RobotChorale(_)
             | Call::RobotSetMode(_)
@@ -1540,6 +1555,7 @@ impl Call {
             Call::PolicySearch(p) => encode(p),
             Call::AccountLogin(p) => encode(p),
             Call::RobotSound(p) => encode(p),
+            Call::RobotFlashlight(p) => encode(p),
             Call::RobotTheremin(p) => encode(p),
             Call::RobotChorale(p) => encode(p),
             Call::ChoraleBeaconSet(p) => encode(p),
@@ -1632,6 +1648,7 @@ impl Call {
             method::ROBOT_POSE => Call::RobotPose(decode(params)?),
             method::ROBOT_MOUTH => Call::RobotMouth(decode(params)?),
             method::ROBOT_SOUND => Call::RobotSound(decode(params)?),
+            method::ROBOT_FLASHLIGHT => Call::RobotFlashlight(decode(params)?),
             method::ROBOT_THEREMIN => Call::RobotTheremin(decode(params)?),
             method::ROBOT_CHORALE => Call::RobotChorale(decode(params)?),
             method::CHORALE_SUBSCRIBE => Call::ChoraleSubscribe,
@@ -1795,6 +1812,11 @@ pub mod test_support {
             Call::RobotSound(SoundParams {
                 tag: SoundTag::Chirp,
                 hold: None,
+            }),
+            Call::RobotFlashlight(FlashlightParams {
+                on: true,
+                toggle: false,
+                color: FlashlightColor::Cyan,
             }),
             Call::RobotShutdown,
             Call::RobotMode,
@@ -2261,6 +2283,46 @@ pub struct SoundParams {
     /// so a client that dies mid-ride does not leave the robot going "wheee" forever.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hold: Option<bool>,
+}
+
+/// What the flashlight shows: the seven colours its three on/off channels make.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FlashlightColor {
+    #[default]
+    White,
+    Red,
+    Green,
+    Blue,
+    Yellow,
+    Cyan,
+    Magenta,
+}
+
+impl FlashlightColor {
+    /// Which of the red, green and blue channels are lit.
+    pub fn channels(self) -> [bool; 3] {
+        match self {
+            FlashlightColor::White => [true, true, true],
+            FlashlightColor::Red => [true, false, false],
+            FlashlightColor::Green => [false, true, false],
+            FlashlightColor::Blue => [false, false, true],
+            FlashlightColor::Yellow => [true, true, false],
+            FlashlightColor::Cyan => [false, true, true],
+            FlashlightColor::Magenta => [true, false, true],
+        }
+    }
+}
+
+/// See [`method::ROBOT_FLASHLIGHT`]. Shaped like [`EnableParams`]: `toggle` wins over `on`, so a
+/// button that does not know the light's state can still flip it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct FlashlightParams {
+    pub on: bool,
+    pub toggle: bool,
+    /// The colour it lights in. Ignored when the call switches it off.
+    pub color: FlashlightColor,
 }
 
 /// See [`method::ROBOT_THEREMIN`].
@@ -5664,7 +5726,7 @@ mod tests {
     fn every_call_covers_every_variant() {
         assert_eq!(
             every_call().len(),
-            68,
+            69,
             "a Call variant was added or removed — update every_call() and this count"
         );
     }
