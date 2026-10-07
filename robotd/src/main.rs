@@ -6013,19 +6013,14 @@ mod tests {
         );
     }
 
-    /// Limp-fall ships OFF (the default gait has no standing network to hand back to), and
-    /// switched on it must refuse a fallen robot nothing.
+    /// Limp-fall ships ON, and it must refuse a fallen robot nothing.
     ///
     /// This is the contract that answers "I booted it face-down and pressed Start": enable
     /// and init are never refused for gravity, whatever the mode is set to.
     #[test]
-    fn limp_fall_ships_off_and_refuses_nothing() {
-        let mut params = Params::default();
-        assert!(
-            !params.safety.limp_fall,
-            "off by default: velstand loads no standing policy"
-        );
-        params.safety.limp_fall = true;
+    fn limp_fall_ships_on_and_refuses_nothing() {
+        let params = Params::default();
+        assert!(params.safety.limp_fall, "on by default");
 
         let s = RobotState::new(
             &params,
